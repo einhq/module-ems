@@ -180,6 +180,7 @@ Deno.test('detectVideoFaces sends the sampling and the gate, and keeps the answe
     box: { x: 0.4, y: 0.2, width: 0.1, height: 0.18 },
     confidence: 0.93,
     embedding: [0.6, 0.8],
+    track: [[4, 0.4, 0.2, 0.1, 0.18]] as [number, number, number, number, number][],
   };
   const result: DetectVideoFacesResult = { frame: { width: 1920, height: 1080 }, duration: 63.2, interval: 1, samples: 63, faces: [face] };
   const stub = startStubEms({ ops: { 'faces.detect_video': { result } } });

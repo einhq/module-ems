@@ -100,7 +100,8 @@ export type ActiveSpeaker = { id: string; score: number; t: number; box: Box; co
 /**
  * One face a video shows: when it is on screen (`[start, end]` in seconds), how many sampled
  * frames it was found in, and its clearest detection — `box`, `landmarks` and `pose` in the
- * display frame at `t` seconds. `embedding` is the normalized mean of its best detections.
+ * display frame at `t` seconds. `embedding` is the normalized mean of its best detections, and
+ * `track` its box in every sampled frame it was seen in, `[t, x, y, width, height]` in time order.
  */
 type VideoFace = {
   appearances: [number, number][];
@@ -111,6 +112,7 @@ type VideoFace = {
   landmarks?: number[][];
   pose?: FacePose;
   embedding: number[];
+  track: [number, number, number, number, number][];
 };
 
 /** `interval` is the spacing EMS sampled at, longer than asked for a long video. */

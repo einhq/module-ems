@@ -10,9 +10,11 @@
 
 import { assert, assertAlmostEquals, assertEquals, assertRejects, assertStringIncludes } from '@std/assert';
 import type { Command } from '@ein/client';
+import type { DetectVideoFacesResult } from '../lib/client.ts';
 import {
   activeSpeakers,
   detectFaces,
+  detectVideoFaces,
   embedTexts,
   EmsError,
   EmsUnavailableError,
@@ -165,6 +167,26 @@ Deno.test('the speech ops map EMS shapes onto the client types', async () => {
       file: { path: '/f/a.mp4', angle: 90, mirror: false },
       speakers: [{ id: 'speaker_0', turns: [[0, 2]] }],
     });
+  } finally {
+    await stub.close();
+  }
+});
+
+Deno.test('detectVideoFaces sends the sampling and the gate, and keeps the answer as EMS gave it', async () => {
+  const face = {
+    appearances: [[0.5, 9.5]] as [number, number][],
+    detections: 9,
+    t: 4,
+    box: { x: 0.4, y: 0.2, width: 0.1, height: 0.18 },
+    confidence: 0.93,
+    embedding: [0.6, 0.8],
+  };
+  const result: DetectVideoFacesResult = { frame: { width: 1920, height: 1080 }, duration: 63.2, interval: 1, samples: 63, faces: [face] };
+  const stub = startStubEms({ ops: { 'faces.detect_video': { result } } });
+  try {
+    const { cmd } = makeCmd({ CFG_EMS_URL: stub.url });
+    assertEquals(await detectVideoFaces(cmd, '/f/a.mp4', 90, true, { minSize: 0.02, minConfidence: 0.7 }), result);
+    assertEquals(stub.requests[0].body, { file: { path: '/f/a.mp4', angle: 90, mirror: true }, min_size: 0.02, min_confidence: 0.7 });
   } finally {
     await stub.close();
   }

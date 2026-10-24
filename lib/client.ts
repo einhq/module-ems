@@ -98,6 +98,31 @@ type VoiceprintResult = { turns: VoiceTurn[]; speakers: VoiceSpeaker[]; speech: 
 export type ActiveSpeaker = { id: string; score: number; t: number; box: Box; confidence: number; embedding: number[] };
 
 /**
+ * One face a video shows: when it is on screen (`[start, end]` in seconds), how many sampled
+ * frames it was found in, and its clearest detection — `box`, `landmarks` and `pose` in the
+ * display frame at `t` seconds. `embedding` is the normalized mean of its best detections.
+ */
+type VideoFace = {
+  appearances: [number, number][];
+  detections: number;
+  t: number;
+  box: Box;
+  confidence: number;
+  landmarks?: number[][];
+  pose?: FacePose;
+  embedding: number[];
+};
+
+/** `interval` is the spacing EMS sampled at, longer than asked for a long video. */
+export type DetectVideoFacesResult = {
+  frame: { width: number; height: number };
+  duration: number | null;
+  interval: number;
+  samples: number;
+  faces: VideoFace[];
+};
+
+/**
  * An SSCD descriptor is a unit vector, close to a copy's; a chromaprint is a recording's raw
  * sequence of 32-bit values, which matches another only once aligned.
  */
@@ -524,6 +549,36 @@ export const activeSpeakers = async (
   await withHostPath(cmd, videoPath, async (hostVideo) => {
     const raw = await request(cmd, 'speech.active_speakers', { file: fileRef(hostVideo, angle, mirror), speakers }, opts);
     return (raw.result as { speakers: ActiveSpeaker[] }).speakers;
+  });
+
+type DetectVideoFacesOptions = Pick<CallOptions, 'onProgress'> & {
+  /** Seconds between the frames looked at; EMS's default is 1. */
+  interval?: number;
+  /** Smallest face kept, as a fraction of the frame's shorter side. */
+  minSize?: number;
+  /** Lowest detection confidence kept. */
+  minConfidence?: number;
+};
+
+/**
+ * The faces a video shows and when, in one request: EMS samples the video once, follows each
+ * face through it and groups the sightings into one face per person seen — two faces on screen
+ * together are never one. The boxes are fractions of the display frame `angle`/`mirror` name.
+ */
+export const detectVideoFaces = async (
+  cmd: Command,
+  path: string,
+  angle: number,
+  mirror: boolean,
+  opts: DetectVideoFacesOptions = {},
+): Promise<DetectVideoFacesResult> =>
+  await withHostPath(cmd, path, async (hostPath) => {
+    const body: Record<string, unknown> = { file: fileRef(hostPath, angle, mirror) };
+    if (opts.interval !== undefined) body.interval = opts.interval;
+    if (opts.minSize !== undefined) body.min_size = opts.minSize;
+    if (opts.minConfidence !== undefined) body.min_confidence = opts.minConfidence;
+    const raw = await request(cmd, 'faces.detect_video', body, { onProgress: opts.onProgress });
+    return raw.result as DetectVideoFacesResult;
   });
 
 type EmbedImageOptions = EmbedTextOptions & {

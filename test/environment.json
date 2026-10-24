@@ -1,0 +1,4 @@
+{
+  "CFG_EMS_URL": "http://127.0.0.1:1",
+  "CFG_EMS_CONNECT_RETRY": "0"
+}

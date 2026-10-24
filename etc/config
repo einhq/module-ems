@@ -1,0 +1,5 @@
+# ems's own choice of settings, linked as /etc/config.d/ems by mod setup and sourced before
+# /etc/config, so a value the administrator sets there wins over these.
+
+# Turn texts into vectors with EMS's text model, for whatever finds things by meaning.
+export CFG_TEXT_EMBEDDER='ems-text-embed'

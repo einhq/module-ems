@@ -1,0 +1,32 @@
+#!ts
+/**
+ * ems-gpu-sample — one reading of the card the media service runs on, which the `gpu-sampler`
+ * service appends to the `gpu` metrics series.
+ *
+ * The card is EMS's: this container is given none, and never looks for one. EMS's own health
+ * answer says what its `nvidia-smi` sees, whole-card, and that is what the dashboard charts.
+ * `null` when there is no media service configured, it is not answering, or it sees no card —
+ * the service then writes nothing, rather than a row of zeroes that reads as an idle GPU.
+ */
+
+import type { CmdReturn, Command } from '@ein/client';
+import { sampleGpu } from '@ems/gpu';
+
+const emsGpuSample = async (cmd: Command): CmdReturn => {
+  const sample = await sampleGpu(cmd);
+  if (cmd.json) await cmd.writeJSON(sample ?? null);
+  else await cmd.writeLn(sample ? `${sample.utilPct}% · ${sample.memUsedMb}/${sample.memTotalMb} MB · ${sample.tempC} °C` : 'no GPU reading');
+  return 0;
+};
+
+emsGpuSample.spec = {
+  name: 'ems-gpu-sample',
+  effect: 'read' as const,
+  description: "One reading of the media service's GPU: utilization, VRAM and temperature",
+  args: [],
+  flags: [],
+  examples: ['ems-gpu-sample'],
+  returns: 'utilPct, memUsedMb, memTotalMb and tempC, or null when there is no reading.',
+};
+
+export default emsGpuSample;

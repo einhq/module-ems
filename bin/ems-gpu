@@ -1,0 +1,89 @@
+#!ts
+/**
+ * ems-gpu — the media service's card now, with its last six hours, for the system dashboard's GPU
+ * panel (ems's `system.overview` panel).
+ *
+ * Read back from the `gpu` metrics series the `gpu-sampler` service keeps, so a dashboard open in
+ * three browsers costs no request to EMS. Null when there is no reading: no media service, or one
+ * that sees no card — no GPU and an idle GPU are not the same fact.
+ *
+ * `--gauge` answers the gauges `top` draws beside the host's RAM (the `gpu-sampler` service's
+ * `gaugeCommand`): the card's utilization and its memory, or none without a reading.
+ */
+import { type CmdReturn, collectUnknownFlags, type Command, type Gauge, parseArgs, readTail, reportUnknownFlags, seriesPath } from '@ein/client';
+import type { EmsGpu, GpuPoint, GpuSample } from '@ems/api';
+
+/** Six hours at the sampler's 15 s. */
+const WINDOW_MS = 6 * 60 * 60 * 1000;
+const READ_LIMIT = 1600;
+/** Points per sparkline: more than a tile is wide is only bytes. */
+const POINTS = 120;
+
+const percent = (used: number, total: number): number | undefined => total > 0 ? (used / total) * 100 : undefined;
+
+/** Every n-th sample, keeping the newest, so the line spans the whole window in `POINTS`. */
+const thin = <T>(samples: T[]): T[] => {
+  if (samples.length <= POINTS) return samples;
+  const step = samples.length / POINTS;
+  return Array.from({ length: POINTS }, (_, i) => samples[Math.min(samples.length - 1, Math.round((i + 1) * step) - 1)]);
+};
+
+const points = (samples: { at: number; value: GpuSample }[], value: (entry: GpuSample) => number | undefined): GpuPoint[] =>
+  thin(samples).flatMap((sample) => {
+    const v = value(sample.value);
+    return v === undefined ? [] : [{ at: sample.at, value: v }];
+  });
+
+const emsGpu = async (cmd: Command): CmdReturn => {
+  const unknown: string[] = [];
+  const flags = parseArgs(cmd.args, { boolean: ['gauge'], unknown: collectUnknownFlags(unknown) });
+  if (await reportUnknownFlags(cmd, unknown)) return 1;
+
+  const all = await readTail<GpuSample>(cmd.sys.vfs, cmd.access, seriesPath('gpu'), READ_LIMIT);
+  const since = Date.now() - WINDOW_MS;
+  const recent = all.filter((sample) => sample.at >= since);
+  const now = recent[recent.length - 1]?.value;
+
+  const answer: EmsGpu = now
+    ? {
+      ...now,
+      vramPercent: percent(now.memUsedMb, now.memTotalMb),
+      utilSeries: points(recent, (entry) => entry.utilPct),
+      vramSeries: points(recent, (entry) => percent(entry.memUsedMb, entry.memTotalMb)),
+    }
+    : null;
+
+  if (flags.gauge) {
+    const gauges: Gauge[] = answer
+      ? [
+        { label: 'GPU', percent: answer.utilPct, value: `${Math.round(answer.utilPct)}%  ${answer.tempC}°C` },
+        { label: 'VRAM', percent: answer.vramPercent, value: `${(answer.memUsedMb / 1024).toFixed(1)}/${(answer.memTotalMb / 1024).toFixed(1)} GB` },
+      ]
+      : [];
+    if (cmd.json) await cmd.writeJSON(gauges);
+    else for (const gauge of gauges) await cmd.writeLn(`${gauge.label} ${gauge.value}`);
+    return 0;
+  }
+
+  if (cmd.json) {
+    await cmd.writeJSON(answer satisfies EmsGpu);
+    return 0;
+  }
+  if (!answer) await cmd.writeLn('no GPU reading in the last six hours');
+  else await cmd.writeLn(`gpu ${Math.round(answer.utilPct)}%  vram ${answer.memUsedMb}/${answer.memTotalMb} MB  ${answer.tempC}°C`);
+  return 0;
+};
+
+emsGpu.spec = {
+  name: 'ems-gpu',
+  effect: 'read' as const,
+  description: "The media service's GPU now, with the last six hours of utilization and VRAM",
+  args: [],
+  flags: [
+    { name: 'gauge', type: 'bool' as const, description: 'The GPU and VRAM gauges top draws beside the host (the gpu-sampler service declares it)' },
+  ],
+  examples: ['ems-gpu', 'ems-gpu --gauge'],
+  returns: 'utilPct, memUsedMb, memTotalMb, tempC, vramPercent and the utilization and VRAM series, or null when there is no reading.',
+};
+
+export default emsGpu;

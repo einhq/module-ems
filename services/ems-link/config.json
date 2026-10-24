@@ -1,0 +1,6 @@
+{
+  "description": "Watches the media service and reports what it holds",
+  "restartPolicy": "on-failure",
+  "statusCommand": "ems-status --brief",
+  "checkCommand": "ems-status --checks"
+}

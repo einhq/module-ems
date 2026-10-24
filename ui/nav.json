@@ -1,0 +1,25 @@
+{
+  "panels": [
+    {
+      "id": "ems.gpu",
+      "slot": "system.overview",
+      "label": "GPU",
+      "icon": "device-desktop-analytics",
+      "route": "/system/gpu"
+    },
+    {
+      "id": "ems.media-service",
+      "slot": "system.tabs",
+      "label": "Media service",
+      "icon": "cpu",
+      "route": "/system/media-service"
+    },
+    {
+      "id": "ems.about",
+      "slot": "about.services",
+      "label": "Media service",
+      "icon": "cpu",
+      "route": "/about/media-service"
+    }
+  ]
+}

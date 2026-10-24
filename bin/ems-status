@@ -1,0 +1,103 @@
+#!ts
+/**
+ * ems-status — what the media service currently holds, and whether it is degraded.
+ *
+ * A card EMS has lost sends its models to the CPU, several times slower and otherwise
+ * indistinguishable from slow indexing; EMS names it in `degraded`, and this is where that
+ * reaches whoever is watching the crawl. `rssMb` against `maxRssMb` is the model worker's host
+ * memory, and `recycles` how many times it has crossed its ceiling and rebuilt itself — a number
+ * that keeps climbing is a per-request leak, not a busy day.
+ *
+ * `families` is every model EMS can load, resident or not, with each copy's state (loading,
+ * loaded, unloading) and device, and `requests` what is being executed or queued right now, per
+ * op — what the system dashboard's media service tab draws.
+ *
+ * `--brief` prints one line and is what `service-list --detail` shows beside the `ems-link` service.
+ * `--checks` answers `health`'s checks (the `ems-link` service's `checkCommand`): whether EMS
+ * answers and its model worker runs, each degradation, and the card. None fails while EMS merely
+ * restarts or is busy — the steps that need it wait — except a card the host should have and does
+ * not see, which a person has to put back.
+ */
+import type { CmdReturn, Command } from '@ein/client';
+import { parseArgs } from '@ein/client';
+import type { EmsStatus } from '@ems/api';
+import { health } from '@ems/client';
+import { age, checksOf, statusFromHealth } from '@ems/status';
+
+const emsStatus = async (cmd: Command): CmdReturn => {
+  const flags = parseArgs(cmd.args, { boolean: ['brief', 'checks', 'card'] });
+  const result = await health(cmd);
+  const url = cmd.env.CFG_EMS_URL || 'http://127.0.0.1:8181';
+
+  if (flags.checks) {
+    const checks = checksOf(result ? statusFromHealth(result, url) : { running: false, url });
+    if (cmd.json) await cmd.writeJSON(checks);
+    else for (const check of checks) await cmd.writeLn(`${check.state.padEnd(5)} ${check.name}  ${check.reason}`);
+    return 0;
+  }
+
+  // The card's mode alone, for whatever shares the card and follows it: nothing when EMS cannot say.
+  if (flags.card) {
+    const mode = result?.card?.mode;
+    if (cmd.json) await cmd.writeJSON({ mode: mode ?? null });
+    else if (mode) await cmd.writeLn(mode);
+    return mode ? 0 : 1;
+  }
+
+  if (!result) {
+    if (cmd.json) {
+      await cmd.writeJSON({ running: false, url } satisfies EmsStatus);
+    } else if (flags.brief) {
+      await cmd.writeLn('not answering');
+    } else {
+      await cmd.writeError(`ems-status: ${url} is not answering\n`);
+    }
+    return 1;
+  }
+
+  const status = statusFromHealth(result, url);
+
+  if (cmd.json) {
+    await cmd.writeJSON(status satisfies EmsStatus);
+    return 0;
+  }
+
+  if (flags.brief) {
+    // Degradation leads because it is the only actionable thing here; a healthy service reads
+    // as a plain census.
+    const parts: string[] = [];
+    for (const d of status.degraded) {
+      parts.push(`${d.what} degraded: ${d.reason}${d.since ? ` for ${age(Date.now() / 1000 - d.since)}` : ''}`);
+    }
+    if (!result.worker.running) parts.push('model worker down');
+    // Who has the card: indexing (busy) or search (quiet).
+    if (status.card && status.card.mode !== 'off') parts.push(`card ${status.card.mode}`);
+    // A load or an unload in progress is the other thing worth a glance: a cold load can take minutes.
+    for (const family of status.families) {
+      for (const copy of family.copies) if (copy.state !== 'loaded') parts.push(`${copy.key} ${copy.state}`);
+    }
+    parts.push(status.loaded.length > 0 ? `loaded ${status.loaded.join(' ')}` : 'no models loaded');
+    if (status.vramReservedMb !== undefined) parts.push(`vram ${status.vramReservedMb} MB`);
+    if (status.rssMb !== undefined) parts.push(`rss ${status.rssMb}${status.maxRssMb ? `/${status.maxRssMb}` : ''} MB`);
+    if (status.recycles) parts.push(`${status.recycles} recycle(s)`);
+    await cmd.writeLn(parts.join(' · '));
+    return 0;
+  }
+
+  await cmd.writeYAML(status);
+  return 0;
+};
+
+emsStatus.spec = {
+  name: 'ems-status',
+  effect: 'read' as const,
+  description: 'Show media service health: version, every model and its state, what is executing, degradation, worker memory and queues',
+  args: [],
+  flags: [
+    { name: 'brief', type: 'bool' as const, description: 'One line, degradation first (used by service-list --detail)' },
+    { name: 'checks', type: 'bool' as const, description: 'The checks health reads: answering, model worker, degradations, card' },
+    { name: 'card', type: 'bool' as const, description: "The card's mode alone: quiet, busy, switching or off; fails when EMS cannot say" },
+  ],
+};
+
+export default emsStatus;

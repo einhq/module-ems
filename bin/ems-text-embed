@@ -1,0 +1,70 @@
+#!ts
+/**
+ * ems-text-embed — texts as vectors, by EMS's current text model.
+ *
+ * The command the core setting `CFG_TEXT_EMBEDDER` names (set in ems's `etc/config`), so a module
+ * that finds things by meaning — the assistant's command finder — asks for vectors and names no
+ * service. The vectors come with the model that made them, since two models' vectors are not
+ * comparable; `--model` answers the model alone.
+ */
+
+import type { TextEmbedding } from '@ein/api';
+import type { CmdReturn, Command } from '@ein/client';
+import { collectUnknownFlags, parseArgs, reportUnknownFlags } from '@ein/client';
+import { embedTexts, textEmbedGeneration } from '@ems/client';
+
+const emsTextEmbed = async (cmd: Command): CmdReturn => {
+  const unknown: string[] = [];
+  const flags = parseArgs(cmd.args, { string: ['role', 'timeout'], boolean: ['model'], unknown: collectUnknownFlags(unknown) });
+  if (await reportUnknownFlags(cmd, unknown)) return 1;
+
+  if (flags.model) {
+    const model = await textEmbedGeneration(cmd).catch(() => null);
+    if (!model) {
+      await cmd.writeError('ems-text-embed: EMS cannot say which text model it has\n');
+      return 1;
+    }
+    if (cmd.json) await cmd.writeJSON({ model, vectors: [] } satisfies TextEmbedding);
+    else await cmd.writeLn(model);
+    return 0;
+  }
+
+  const texts = (flags._ as string[]).map(String);
+  const role = flags.role === 'query' ? 'query' : flags.role === undefined || flags.role === 'document' ? 'document' : undefined;
+  const timeout = parseInt(flags.timeout ?? '', 10);
+  if (texts.length === 0 || !role) {
+    await cmd.writeError(`ems-text-embed: ${texts.length === 0 ? 'missing text' : '--role is query or document'}\n`);
+    return 1;
+  }
+  try {
+    const { vectors, producer } = await embedTexts(cmd, texts, {
+      role,
+      interactive: true,
+      ...(Number.isFinite(timeout) && timeout > 0 ? { timeoutSeconds: timeout } : {}),
+    });
+    if (cmd.json) await cmd.writeJSON({ model: producer, vectors } satisfies TextEmbedding);
+    else for (const vector of vectors) await cmd.writeLn(vector.join(' '));
+    return 0;
+  } catch (error) {
+    await cmd.writeError(`ems-text-embed: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+};
+
+emsTextEmbed.spec = {
+  name: 'ems-text-embed',
+  effect: 'read' as const,
+  description: "Texts as vectors, by EMS's current text model, to compare by meaning",
+  args: [
+    { name: 'text', type: 'string' as const, variadic: true, description: 'the texts, one vector each' },
+  ],
+  flags: [
+    { name: 'role', type: 'string' as const, description: 'query for what is searched with, document (the default) for what is searched' },
+    { name: 'timeout', type: 'number' as const, description: 'seconds to wait for EMS' },
+    { name: 'model', type: 'bool' as const, description: 'the current text model alone, no vectors' },
+  ],
+  examples: ["ems-text-embed --role query 'restart a service'", 'ems-text-embed --model'],
+  returns: 'model, the model that made them, and vectors, one per text in order.',
+};
+
+export default emsTextEmbed;

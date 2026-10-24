@@ -1,0 +1,5 @@
+{
+  "description": "Samples the media service's GPU for the system dashboard",
+  "restartPolicy": "on-failure",
+  "gaugeCommand": "ems-gpu --gauge"
+}

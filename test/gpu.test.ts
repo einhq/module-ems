@@ -36,6 +36,11 @@ Deno.test('gpuSampleFromHealth: EMS field names become the series entry', () => 
   assertEquals(gpuSampleFromHealth(HEALTH), { utilPct: 37, memUsedMb: 8123, memTotalMb: 16311, tempC: 51 });
 });
 
+Deno.test('gpuSampleFromHealth: the decoder and encoder ride along when EMS reports them', () => {
+  const gpu = { ...HEALTH.gpu, util_pct: 37.4, dec_pct: 21, enc_pct: 0 };
+  assertEquals(gpuSampleFromHealth({ ...HEALTH, gpu }), { utilPct: 37.4, decPct: 21, encPct: 0, memUsedMb: 8123, memTotalMb: 16311, tempC: 51 });
+});
+
 Deno.test('gpuSampleFromHealth: a card EMS cannot read is no sample', () => {
   // `present` alone — torch's view or no view — says nothing about utilization.
   assertEquals(gpuSampleFromHealth({ ok: true, gpu: { present: true, vram_reserved_mb: 7900 } }), undefined);

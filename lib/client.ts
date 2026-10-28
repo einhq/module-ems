@@ -148,13 +148,16 @@ export type HealthResult = {
   /**
    * Two views of the card: torch's accounting for this EMS's models (`vram_*`), and the whole
    * card as `nvidia-smi` sees it (`util_pct`, `mem_*`, `temp_c`), absent when EMS cannot run
-   * `nvidia-smi`.
+   * `nvidia-smi`. Where the driver keeps samples, `util_pct` and the video decoder's and encoder's
+   * `dec_pct` / `enc_pct` are means over the last 15 s.
    */
   gpu: {
     present: boolean;
     vram_allocated_mb?: number;
     vram_reserved_mb?: number;
     util_pct?: number;
+    dec_pct?: number;
+    enc_pct?: number;
     mem_used_mb?: number;
     mem_total_mb?: number;
     temp_c?: number;

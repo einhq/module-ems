@@ -330,9 +330,11 @@ function Memory({ status }: { status: Running }) {
         {gpu?.utilPct !== undefined && (
           <StatTile
             label='GPU load'
-            value={`${gpu.utilPct}%`}
+            value={`${Math.round(gpu.utilPct)}%`}
             accent={utilizationColor(gpu.utilPct)}
             hint={[
+              gpu.decPct !== undefined ? `decode ${Math.round(gpu.decPct)}%` : '',
+              gpu.encPct ? `encode ${Math.round(gpu.encPct)}%` : '',
               gpu.tempC !== undefined ? `${gpu.tempC} °C` : '',
               gpu.powerW !== undefined ? `${Math.round(gpu.powerW)}${gpu.powerLimitW ? `/${Math.round(gpu.powerLimitW)}` : ''} W` : '',
             ]

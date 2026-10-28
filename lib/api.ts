@@ -114,6 +114,8 @@ export type EmsStatus =
       name?: string;
       driver?: string;
       utilPct?: number;
+      decPct?: number;
+      encPct?: number;
       memUsedMb?: number;
       memTotalMb?: number;
       tempC?: number;
@@ -136,9 +138,15 @@ export type EmsStatus =
     warnings?: string[];
   };
 
-/** One reading of the card EMS runs on, as `ems-gpu-sample` answers and the `gpu` series stores it. */
+/**
+ * One reading of the card EMS runs on, as `ems-gpu-sample` answers and the `gpu` series stores it.
+ * The loads are means over the seconds before it where EMS can average them; `decPct` and `encPct`
+ * are the video decoder and encoder, which `utilPct` does not count.
+ */
 export type GpuSample = {
   utilPct: number;
+  decPct?: number;
+  encPct?: number;
   memUsedMb: number;
   memTotalMb: number;
   tempC: number;

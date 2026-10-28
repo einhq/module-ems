@@ -2,8 +2,8 @@
  * GPU probe — EMS's `GET /v0/health`, or nothing.
  *
  * The card is EMS's: this process has no device and never looks for one. A
- * sample is the whole card as the media service reports it — utilization, memory
- * and temperature as EMS's own `nvidia-smi` sees them, not what torch has
+ * sample is the whole card as the media service reports it — utilization (and the video
+ * decoder's and encoder's, when EMS reports them), memory and temperature, not what torch has
  * allocated — read from `CFG_EMS_URL` with `CFG_EMS_KEY` (`serviceKey`).
  *
  * Absent-or-a-sample: no EMS address, an EMS that is not answering, or one whose
@@ -17,11 +17,11 @@ import type { GpuSample } from '@ems/api';
 const EMS_TIMEOUT_MS = 5000;
 
 /** EMS's `health.gpu`, in its own field names. Anything else in the body is not read here. */
-type EmsHealthGpu = { util_pct?: unknown; mem_used_mb?: unknown; mem_total_mb?: unknown; temp_c?: unknown };
+type EmsHealthGpu = { util_pct?: unknown; dec_pct?: unknown; enc_pct?: unknown; mem_used_mb?: unknown; mem_total_mb?: unknown; temp_c?: unknown };
 
 const finite = (value: unknown): number | undefined => (typeof value === 'number' && Number.isFinite(value) ? value : undefined);
 
-/** The whole-card fields of an EMS health answer as a sample, or undefined when any is missing. */
+/** The whole-card fields of an EMS health answer as a sample, or undefined when a required one is missing. */
 export const gpuSampleFromHealth = (body: unknown): GpuSample | undefined => {
   const gpu = (body as { gpu?: EmsHealthGpu } | null)?.gpu;
   if (!gpu || typeof gpu !== 'object') return undefined;
@@ -30,7 +30,9 @@ export const gpuSampleFromHealth = (body: unknown): GpuSample | undefined => {
   const memTotalMb = finite(gpu.mem_total_mb);
   const tempC = finite(gpu.temp_c);
   if (utilPct === undefined || memUsedMb === undefined || memTotalMb === undefined || tempC === undefined) return undefined;
-  return { utilPct, memUsedMb, memTotalMb, tempC };
+  const decPct = finite(gpu.dec_pct);
+  const encPct = finite(gpu.enc_pct);
+  return { utilPct, ...(decPct !== undefined ? { decPct } : {}), ...(encPct !== undefined ? { encPct } : {}), memUsedMb, memTotalMb, tempC };
 };
 
 /** One reading, asked of the EMS at `cmd.env.CFG_EMS_URL`. */

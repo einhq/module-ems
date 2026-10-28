@@ -83,6 +83,8 @@ export const statusFromHealth = (result: HealthResult, url: string): Extract<Ems
       ...(gpu.name ? { name: gpu.name } : {}),
       ...(gpu.driver ? { driver: gpu.driver } : {}),
       ...(gpu.util_pct !== undefined ? { utilPct: gpu.util_pct } : {}),
+      ...(gpu.dec_pct !== undefined ? { decPct: gpu.dec_pct } : {}),
+      ...(gpu.enc_pct !== undefined ? { encPct: gpu.enc_pct } : {}),
       ...(gpu.mem_used_mb !== undefined ? { memUsedMb: gpu.mem_used_mb } : {}),
       ...(gpu.mem_total_mb !== undefined ? { memTotalMb: gpu.mem_total_mb } : {}),
       ...(gpu.temp_c !== undefined ? { tempC: gpu.temp_c } : {}),

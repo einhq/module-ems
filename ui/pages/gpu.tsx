@@ -21,8 +21,8 @@ export default function GpuPanel() {
         value={pct(gpu.utilPct)}
         accent={utilizationColor(gpu.utilPct)}
         icon={<TablerIcon name='cpu-2' size={14} />}
-        hint={`${gpu.tempC}°C`}
-        tooltip="Utilization of the media service's card"
+        hint={[`${gpu.tempC}°C`, ...(gpu.decPct !== undefined ? [`decode ${pct(gpu.decPct)}`] : []), ...(gpu.encPct ? [`encode ${pct(gpu.encPct)}`] : [])].join(' · ')}
+        tooltip="Compute load on the media service's card over the seconds before each reading; video decoding and encoding run on units of their own"
         series={gpu.utilSeries}
       />
       <StatTile

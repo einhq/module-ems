@@ -884,13 +884,17 @@ type Shots = {
   producer: string;
 };
 
+/** A rule of `video.shots` to set instead of EMS's default: the score a cut must reach. */
+type ShotsOptions = { threshold?: number };
+
 /**
  * Where an upright video — a rendition — cuts from one shot to the next: TransNetV2 over every frame,
- * and EMS's rules with their measured defaults.
+ * and EMS's rules with their measured defaults, or the threshold the caller gives.
  */
-export const videoShots = async (cmd: Command, path: string): Promise<Shots> =>
+export const videoShots = async (cmd: Command, path: string, opts: ShotsOptions = {}): Promise<Shots> =>
   await withHostPath(cmd, path, async (hostPath) => {
-    const answer = await request(cmd, 'video.shots', { file: { path: hostPath } });
+    const body = { file: { path: hostPath }, ...(opts.threshold !== undefined ? { threshold: opts.threshold } : {}) };
+    const answer = await request(cmd, 'video.shots', body);
     const raw = answer.result as Omit<Shots, 'producer'>;
     return { duration: raw.duration, frames: raw.frames, cuts: raw.cuts ?? [], params: raw.params ?? {}, producer: producerOf(answer) };
   });

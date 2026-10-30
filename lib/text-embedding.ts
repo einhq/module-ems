@@ -147,9 +147,23 @@ export const embedQuery = async (cmd: Command, query: string): Promise<{ bytes: 
  */
 export const embedPictureQuery = (cmd: Command, query: string): Promise<{ bytes: Uint8Array; producer: string }> => sharedQueryEmbed(cmd, 'picture', query);
 
+/**
+ * How long a person's save waits for one `text.embed` request. A warm embedder answers a batch
+ * in well under a second; past this the text is saved without its vector, which `media-scan`
+ * finds missing and `media-reembed` fills in.
+ */
+const SAVE_TIMEOUT_SECONDS = 10;
+
+/**
+ * How a text is embedded for storing. `interactive` is for a save a person waits on: ahead of
+ * batch work in EMS's queues, failing at once when EMS is away and after SAVE_TIMEOUT_SECONDS
+ * when it is wedged, instead of retrying the connection as batch work does.
+ */
+export type StoreOptions = { interactive?: boolean };
+
 /** Texts as current-space vectors for storing, with their type and producer. */
-export const embedForStore = async (cmd: Command, texts: string[]): Promise<{ vectors: number[][]; type: string; producer: string }> => {
-  const { vectors, producer } = await embedTexts(cmd, texts, { role: 'document' });
+export const embedForStore = async (cmd: Command, texts: string[], opts: StoreOptions = {}): Promise<{ vectors: number[][]; type: string; producer: string }> => {
+  const { vectors, producer } = await embedTexts(cmd, texts, { role: 'document', ...(opts.interactive ? { interactive: true, timeoutSeconds: SAVE_TIMEOUT_SECONDS } : {}) });
   const type = textEmbeddingType(producer);
   if (!type) throw new Error(`no embedding type for text embedder "${producer}"`);
   return { vectors, type, producer };
@@ -202,9 +216,10 @@ const storeCurrentText = async (
   parent: string,
   text: string,
   attrs: Record<string, unknown> = {},
+  opts: StoreOptions = {},
 ): Promise<string | undefined> => {
   try {
-    const { vectors, type, producer } = await embedForStore(cmd, [text]);
+    const { vectors, type, producer } = await embedForStore(cmd, [text], opts);
     const embeddedAt = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
     await writeTextVector(cmd, parent, type, type, vectors[0], { ...attrs, embeddedBy: producer, embeddedAt });
     return undefined;
@@ -293,6 +308,7 @@ export const storeCurrentChunks = async (
   parent: string,
   chunks: TextChunk[],
   attrs: Record<string, unknown> = {},
+  opts: StoreOptions = {},
 ): Promise<string | undefined> => {
   if (chunks.length === 0) {
     // Nothing to embed, but a set from before (a re-transcribed file that turned out silent) must
@@ -311,7 +327,7 @@ export const storeCurrentChunks = async (
     let type = '';
     let producer = '';
     for (let at = 0; at < chunks.length; at += STORE_BATCH) {
-      const batch = await embedForStore(cmd, chunks.slice(at, at + STORE_BATCH).map((chunk) => chunk.text));
+      const batch = await embedForStore(cmd, chunks.slice(at, at + STORE_BATCH).map((chunk) => chunk.text), opts);
       vectors.push(...batch.vectors);
       ({ type, producer } = batch);
     }
@@ -369,7 +385,7 @@ export const authoredStale = async (cmd: Command, file: string, text: string, pr
  * vector when the description was cleared. Answers why it did not, or undefined; a description
  * that could not be embedded is still saved, and `media-reembed` fills the vector in later.
  */
-export const storeAuthoredText = async (cmd: Command, file: string, text: string): Promise<string | undefined> => {
+export const storeAuthoredText = async (cmd: Command, file: string, text: string, opts: StoreOptions = {}): Promise<string | undefined> => {
   const parent = authoredParent(file);
   try {
     if (!text) {
@@ -381,7 +397,7 @@ export const storeAuthoredText = async (cmd: Command, file: string, text: string
   } catch (error) {
     return error instanceof Error ? error.message : String(error);
   }
-  return await storeCurrentText(cmd, parent, currentTextOf(text), { authoredHash: await authoredHash(text) });
+  return await storeCurrentText(cmd, parent, currentTextOf(text), { authoredHash: await authoredHash(text) }, opts);
 };
 
 /**
@@ -394,9 +410,10 @@ export const storeCurrentContent = async (
   parent: string,
   text: string,
   attrs: Record<string, unknown> = {},
+  opts: StoreOptions = {},
 ): Promise<string | undefined> => {
   const trimmed = text.trim();
-  if (trimmed.length <= CURRENT_TEXT_CHARS) return await storeCurrentText(cmd, parent, trimmed, { ...attrs, text: trimmed });
+  if (trimmed.length <= CURRENT_TEXT_CHARS) return await storeCurrentText(cmd, parent, trimmed, { ...attrs, text: trimmed }, opts);
   const parts = contentParts(trimmed).map((part) => ({ ...part, attrs: { ...part.attrs, text: part.text } }));
-  return await storeCurrentChunks(cmd, parent, parts, attrs);
+  return await storeCurrentChunks(cmd, parent, parts, attrs, opts);
 };

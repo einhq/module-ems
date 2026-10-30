@@ -1,6 +1,6 @@
 {
   "name": "ems",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "Client for EMS (API v0), the media service that holds every model and media tool: transcription, embeddings, faces, voices, fingerprints, document text",
   "coreApi": "^0.7.0",
   "exports": {

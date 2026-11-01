@@ -9,8 +9,8 @@
 type EmsCopyState = 'loading' | 'loaded' | 'unloading';
 
 /**
- * One copy of a model in a worker's memory. A family can hold two (`insightface` beside
- * `insightface:cpu` after the card ran out), so state is per copy. Times are epoch seconds.
+ * One copy of a model in a worker's memory. A family can hold two (`faces:cuda` beside
+ * `faces:cpu` after the card ran out), so state is per copy. Times are epoch seconds.
  */
 export type EmsModelCopy = {
   key: string;

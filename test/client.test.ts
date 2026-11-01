@@ -19,6 +19,7 @@ import {
   EmsError,
   EmsUnavailableError,
   extractText,
+  faceGeneration,
   fingerprint,
   health,
   transcribe,
@@ -105,10 +106,11 @@ Deno.test('embedTexts returns the vectors and their producer; an interactive cal
   }
 });
 
-Deno.test('detectFaces keeps EMS fractions and numbers the faces', async () => {
+Deno.test('detectFaces keeps EMS fractions, numbers the faces and names their producer', async () => {
   const stub = startStubEms({
     ops: {
       'faces.detect': {
+        producer: 'detector+recogniser',
         result: {
           frame: { width: 200, height: 100 },
           faces: [{ box: { x: 0.1, y: 0.1, width: 0.2, height: 0.2 }, confidence: 0.9, embedding: [1], landmarks: [[0.15, 0.15]], pose: { pitch: 1, yaw: -20, roll: 3 } }],
@@ -128,6 +130,7 @@ Deno.test('detectFaces keeps EMS fractions and numbers the faces', async () => {
       landmarks: [[0.15, 0.15]],
       pose: { pitch: 1, yaw: -20, roll: 3 },
     }]);
+    assertEquals(found.producer, 'detector+recogniser');
     assertEquals(stub.requests[0].body, { file: { path: '/f/a.jpg', angle: 270, mirror: false } });
   } finally {
     await stub.close();
@@ -182,11 +185,11 @@ Deno.test('detectVideoFaces sends the sampling and the gate, and keeps the answe
     embedding: [0.6, 0.8],
     track: [[4, 0.4, 0.2, 0.1, 0.18]] as [number, number, number, number, number][],
   };
-  const result: DetectVideoFacesResult = { frame: { width: 1920, height: 1080 }, duration: 63.2, interval: 1, samples: 63, faces: [face] };
-  const stub = startStubEms({ ops: { 'faces.detect_video': { result } } });
+  const result: Omit<DetectVideoFacesResult, 'producer'> = { frame: { width: 1920, height: 1080 }, duration: 63.2, interval: 1, samples: 63, faces: [face] };
+  const stub = startStubEms({ ops: { 'faces.detect_video': { result, producer: 'detector+recogniser' } } });
   try {
     const { cmd } = makeCmd({ CFG_EMS_URL: stub.url });
-    assertEquals(await detectVideoFaces(cmd, '/f/a.mp4', 90, true, { minSize: 0.02, minConfidence: 0.7 }), result);
+    assertEquals(await detectVideoFaces(cmd, '/f/a.mp4', 90, true, { minSize: 0.02, minConfidence: 0.7 }), { ...result, producer: 'detector+recogniser' });
     assertEquals(stub.requests[0].body, { file: { path: '/f/a.mp4', angle: 90, mirror: true }, min_size: 0.02, min_confidence: 0.7 });
   } finally {
     await stub.close();
@@ -319,5 +322,17 @@ Deno.test('health and the transcribe signature come from the system endpoints', 
     assertEquals(await transcribeSignature(cmd), 'whisper-large-v3:vad=0.2/400/500,nospeech=0.6,lang=auto,words=0');
   } finally {
     await stub.close();
+  }
+});
+
+Deno.test('the face models are the ones capabilities names, and none without faces.detect', async () => {
+  const running = startStubEms({ ops: { 'faces.detect': { result: {} } }, capabilities: { models: { faces: 'detector+recogniser' } } });
+  const without = startStubEms({ capabilities: { models: { faces: 'detector+recogniser' } } });
+  try {
+    assertEquals(await faceGeneration(makeCmd({ CFG_EMS_URL: running.url }).cmd), 'detector+recogniser');
+    assertEquals(await faceGeneration(makeCmd({ CFG_EMS_URL: without.url }).cmd), null);
+  } finally {
+    await running.close();
+    await without.close();
   }
 });

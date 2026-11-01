@@ -51,9 +51,11 @@ type FaceResult = {
 /** `pitch` up/down, `yaw` left/right turn, `roll` tilt, in degrees. */
 type FacePose = { pitch: number; yaw: number; roll: number };
 
+/** `producer` names the models the vectors are from: vectors of two producers are not comparable. */
 type DetectFacesResult = {
   frame: { width: number; height: number };
   faces: FaceResult[];
+  producer: string;
 };
 
 export type TranscriptWord = { start: number; end: number; word: string };
@@ -93,7 +95,8 @@ export type VoiceSpeaker = { id: string; turns: [number, number][]; talkSeconds:
 type VoiceprintResult = { turns: VoiceTurn[]; speakers: VoiceSpeaker[]; speech: boolean; audio: boolean; duration: number; model: string };
 /**
  * The visible face whose lips move with a speaker's voice: `score` 0..1, the face's `box` in
- * fractions of the display frame at `t` seconds, and its InsightFace `embedding` to recognise.
+ * fractions of the display frame at `t` seconds, and its `embedding` to recognise, from the same
+ * recogniser as `detectFaces`'.
  */
 export type ActiveSpeaker = { id: string; score: number; t: number; box: Box; confidence: number; embedding: number[] };
 
@@ -115,13 +118,14 @@ type VideoFace = {
   track: [number, number, number, number, number][];
 };
 
-/** `interval` is the spacing EMS sampled at, longer than asked for a long video. */
+/** `interval` is the spacing EMS sampled at, longer than asked for a long video; `producer` as `detectFaces`'. */
 export type DetectVideoFacesResult = {
   frame: { width: number; height: number };
   duration: number | null;
   interval: number;
   samples: number;
   faces: VideoFace[];
+  producer: string;
 };
 
 /**
@@ -497,16 +501,18 @@ export const embedTexts = async (cmd: Command, texts: string[], opts: EmbedTexts
 };
 
 /**
- * Detect faces with InsightFace: boxes, landmarks and 512-dim embeddings, all as fractions of
- * the display frame named by `angle`/`mirror` — the file node's rotation, never the EXIF tag's.
+ * Detect faces: boxes, landmarks and 512-dim embeddings, all as fractions of the display frame
+ * named by `angle`/`mirror` — the file node's rotation, never the EXIF tag's — and the models
+ * that made them.
  */
 export const detectFaces = async (cmd: Command, path: string, angle = 0, mirror = false): Promise<DetectFacesResult> =>
   await withHostPath(cmd, path, async (hostPath) => {
-    const result = await call(cmd, 'faces.detect', { file: fileRef(hostPath, angle, mirror) }) as {
+    const raw = await request(cmd, 'faces.detect', { file: fileRef(hostPath, angle, mirror) });
+    const result = raw.result as {
       frame: { width: number; height: number };
       faces: { box: Box; confidence: number; embedding: number[]; landmarks?: number[][]; pose?: FacePose }[];
     };
-    return { frame: result.frame, faces: result.faces.map((face, index) => ({ index, ...face })) };
+    return { frame: result.frame, faces: result.faces.map((face, index) => ({ index, ...face })), producer: producerOf(raw) };
   });
 
 /**
@@ -583,7 +589,7 @@ export const detectVideoFaces = async (
     if (opts.minSize !== undefined) body.min_size = opts.minSize;
     if (opts.minConfidence !== undefined) body.min_confidence = opts.minConfidence;
     const raw = await request(cmd, 'faces.detect_video', body, { onProgress: opts.onProgress });
-    return raw.result as DetectVideoFacesResult;
+    return { ...(raw.result as Omit<DetectVideoFacesResult, 'producer'>), producer: producerOf(raw) };
   });
 
 type EmbedImageOptions = EmbedTextOptions & {
@@ -1113,6 +1119,18 @@ export const imageEmbedGeneration = async (cmd: Command): Promise<string | null>
   const model = capabilities?.models?.image_embed;
   const ops = Array.isArray(capabilities?.ops) ? capabilities.ops : [];
   return typeof model === 'string' && model && ops.includes('vision.embed') ? model : null;
+};
+
+/**
+ * The face models EMS runs now (`capabilities.models.faces`), or null when it is not answering or
+ * runs no `faces.detect`. A file whose faces were found by others holds vectors in another space:
+ * its faces are detected again, never compared with the new ones.
+ */
+export const faceGeneration = async (cmd: Command): Promise<string | null> => {
+  const capabilities = await get(cmd, 'capabilities') as { models?: { faces?: unknown }; ops?: unknown } | null;
+  const model = capabilities?.models?.faces;
+  const ops = Array.isArray(capabilities?.ops) ? capabilities.ops : [];
+  return typeof model === 'string' && model && ops.includes('faces.detect') ? model : null;
 };
 
 /**

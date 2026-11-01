@@ -6,7 +6,7 @@ How EiN uses EMS, the EiN Media Service, through this module: what lives there, 
 (core's `src/Containerfile`) is the `denoland/deno` base and nothing else: no
 module spawns a host tool. Core needs the base
 image and PostgreSQL over the network. Everything that used to be baked here — exiftool,
-ImageMagick, ffmpeg, Python, torch and the CUDA stack, InsightFace, the text and picture embedders, whisper,
+ImageMagick, ffmpeg, Python, torch and the CUDA stack, the face models, the text and picture embedders, whisper,
 NeMo, LR-ASD, PP-OCRv6, chromaprint, tesseract, PyMuPDF — lives in **EMS**, the media service, which is its
 own repository, image and container (see _The ems module_ below).
 

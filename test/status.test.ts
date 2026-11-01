@@ -16,15 +16,15 @@ const base: HealthResult = {
 Deno.test('every family is listed, loaded or not, with its copies in camelCase', () => {
   const status = statusFromHealth({
     ...base,
-    models: { insightface: { loaded: true, device: 'cuda' } },
+    models: { faces: { loaded: true, device: 'cuda' } },
     families: {
-      insightface: {
+      faces: {
         model: 'a-face-model',
         device: 'auto',
         pinned: false,
         running: true,
         waiting: 2,
-        copies: [{ key: 'insightface:cuda', state: 'loaded', since: 100, last_used: 200, device: 'cuda', worker: 'batch' }],
+        copies: [{ key: 'faces:cuda', state: 'loaded', since: 100, last_used: 200, device: 'cuda', worker: 'batch' }],
       },
       whisper: { model: 'large-v3', device: 'auto', pinned: false, copies: [] },
       'text-query': { model: 'an-embedder', device: 'cpu', pinned: true, copies: [{ key: 'text-query:cpu', state: 'loading', since: 150, device: 'cpu' }] },
@@ -33,16 +33,16 @@ Deno.test('every family is listed, loaded or not, with its copies in camelCase',
     build: { version: '2.0.0a0', commit: 'abc1234' },
   }, 'http://ems');
 
-  assertEquals(status.loaded, ['insightface:cuda']);
+  assertEquals(status.loaded, ['faces:cuda']);
   assertEquals(status.families, [
     {
-      name: 'insightface',
+      name: 'faces',
       model: 'a-face-model',
       device: 'auto',
       pinned: false,
       running: true,
       waiting: 2,
-      copies: [{ key: 'insightface:cuda', state: 'loaded', device: 'cuda', since: 100, lastUsed: 200, worker: 'batch' }],
+      copies: [{ key: 'faces:cuda', state: 'loaded', device: 'cuda', since: 100, lastUsed: 200, worker: 'batch' }],
     },
     { name: 'whisper', model: 'large-v3', device: 'auto', pinned: false, running: false, waiting: 0, copies: [] },
     {
@@ -99,7 +99,7 @@ Deno.test('the card mode comes through, and each family carries where it runs in
   const status = statusFromHealth({
     ...base,
     families: {
-      insightface: { device: 'auto', pinned: false, copies: [] },
+      faces: { device: 'auto', pinned: false, copies: [] },
       'siglip-text': { device: 'cpu', pinned: true, copies: [] },
     },
     card: {
@@ -110,7 +110,7 @@ Deno.test('the card mode comes through, and each family carries where it runs in
       batch_in_flight: 1,
       search_on_card: [],
       plan: {
-        insightface: { busy: 'card', quiet: 'unloaded' },
+        faces: { busy: 'card', quiet: 'unloaded' },
         'siglip-text': { busy: 'cpu', quiet: 'cpu', why: '3500 MB free, needs 6324 MB' },
       },
     },
@@ -118,13 +118,13 @@ Deno.test('the card mode comes through, and each family carries where it runs in
 
   assertEquals(status.card, { mode: 'busy', since: 100, quietAfter: 600, lastBatch: 150, batchInFlight: 1, searchOnCard: [] });
   assertEquals(status.families.map((family) => [family.name, family.plan]), [
-    ['insightface', { busy: 'card', quiet: 'unloaded' }],
+    ['faces', { busy: 'card', quiet: 'unloaded' }],
     ['siglip-text', { busy: 'cpu', quiet: 'cpu', why: '3500 MB free, needs 6324 MB' }],
   ]);
 });
 
 Deno.test('without a shared card there is no mode and no plan', () => {
-  const status = statusFromHealth({ ...base, families: { insightface: { copies: [] } } }, 'http://ems');
+  const status = statusFromHealth({ ...base, families: { faces: { copies: [] } } }, 'http://ems');
   assertEquals(status.card, undefined);
   assertEquals(status.families[0].plan, undefined);
 });

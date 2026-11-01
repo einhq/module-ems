@@ -27,7 +27,7 @@ const deviceName = (device?: string): string => device === 'cuda' ? 'GPU' : devi
 
 /**
  * What a copy is doing, in the words a person uses: "GPU loaded", "CPU loading", "GPU unloading".
- * The device leads because it is the costly half — `insightface` moved onto the CPU after the card
+ * The device leads because it is the costly half — `faces` moved onto the CPU after the card
  * ran out is resident and several times slower, which "loaded" alone would hide.
  */
 const copyLabel = (copy: EmsModelCopy): string => [deviceName(copy.device), copy.state].filter(Boolean).join(' ');

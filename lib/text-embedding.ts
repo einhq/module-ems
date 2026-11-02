@@ -4,15 +4,17 @@
  * The text space is EMS's configured embedder (`text.embed` `model: current`), in a type per
  * model and a node named after that type, beside the text it was made from:
  *
- *   <file>/metadata/content/text_jina5s              a file's extracted text, or for one longer
- *                                                    than CURRENT_TEXT_CHARS a directory of
- *                                                    parts, `c<N>` (`contentParts`)
- *   <file>/metadata/transcript/text_jina5s/t<second> a transcript chunk
- *   <file>/metadata/authored/text_jina5s             a hand-written description (`attrs.description`)
+ *   <file>/metadata/content/text_bgem3              a file's extracted text, or for one longer
+ *                                                   than CURRENT_TEXT_CHARS a directory of
+ *                                                   parts, `c<N>` (`contentParts`)
+ *   <file>/metadata/transcript/text_bgem3/t<second> a transcript chunk
+ *   <file>/metadata/authored/text_bgem3             a hand-written description (`attrs.description`)
  *
  * A vector table's dimension is fixed when it is created and two models' vectors are not
  * comparable, so a model is a type and a new model is a new one; the names are written down
- * rather than derived because PostgreSQL cuts identifiers at 63 characters.
+ * rather than derived because PostgreSQL cuts identifiers at 63 characters. Writing a vector of
+ * one known type removes the other known types' vectors beside it, so a re-embed into a new model
+ * also clears the old model's.
  *
  * The vectors are derived: what a text is and where it came from (a transcript's `transcribedBy`,
  * say) is on the text node, so a new model is a re-embed (`media-reembed`) and never a re-run of
@@ -29,37 +31,39 @@ import type { Command } from '@ein/client';
 import { shq } from '@ein/client';
 import { embedImageText, embedTexts } from './client.ts';
 
-/** The current embedder's type, by the producer EMS reports. */
-const CURRENT_TEXT_TYPES: Record<string, string> = {
-  // jina-embeddings-v5-text-small: 1024 dimensions, stored as halfvec.
-  'jina-embeddings-v5-text-small': 'text_jina5s',
+/**
+ * A text embedder's space: its type, the lowest similarity a hit is kept at (`floor`: below it,
+ * precision on the retrieval eval's judged pairs falls under one in two), the similarity from
+ * which those pairs hold 0.9 precision (`strict`, for a channel that must not guess) and the
+ * similarity from which a hit says what the query says (`confident`). Similarities are on each model's own scale,
+ * so both move with the model; wow `bench/ems/results/text-embed-2026-11` carries them from one
+ * model to the next (`retrieval-eval.py thresholds`). The callers' `-t` threshold is not applied
+ * to this space.
+ */
+type TextSpace = { type: string; floor: number; strict: number; confident: number };
+
+/** The text embedders' spaces, by the producer EMS reports. */
+const TEXT_SPACES: Record<string, TextSpace> = {
+  // BAAI/bge-m3 (MIT): 1024 dimensions, stored as halfvec. `floor` and `strict` by the same rules
+  // as jina's 0.35 and 0.50; `confident` passes the same share of the pairs as jina's 0.55, which
+  // recordings found by a paraphrase of what was said in them reached and picture queries' best
+  // transcript hits mostly did not (ein/core#524, #889).
+  'bge-m3': { type: 'text_bgem3', floor: 0.50, strict: 0.66, confident: 0.68 },
+  // jina-embeddings-v5-text-small (CC BY-NC), until fry's texts are re-embedded (ein/core#889).
+  'jina-embeddings-v5-text-small': { type: 'text_jina5s', floor: 0.35, strict: 0.50, confident: 0.55 },
 };
 
 /**
  * The type for a current-space vector from this producer, or undefined for a model nothing here
  * knows — a new model has to be given a type on purpose.
  */
-export const textEmbeddingType = (producer: string): string | undefined => CURRENT_TEXT_TYPES[producer];
+export const textEmbeddingType = (producer: string): string | undefined => TEXT_SPACES[producer]?.type;
 
 /** The node names current-space text vectors (or directories of chunk vectors) are kept at. */
-export const TEXT_VECTOR_NAMES: string[] = Object.values(CURRENT_TEXT_TYPES);
+export const TEXT_VECTOR_NAMES: string[] = Object.values(TEXT_SPACES).map((space) => space.type);
 
 /** Whether a node name is a current-space text vector (or a directory of chunk vectors). */
 export const isTextVectorName = (name: string): boolean => TEXT_VECTOR_NAMES.includes(name);
-
-/**
- * The lowest similarity a text hit is kept at: below it, precision on judged retrieval pairs
- * falls under one in two. The callers' `-t` threshold is not applied to this space.
- */
-const CURRENT_TEXT_FLOOR = 0.35;
-
-/**
- * The similarity at which a hit says what the query says. Paraphrases of something said in 20
- * recordings found theirs at 0.45-0.69, the best transcript hit of 47 picture queries was at
- * 0.35-0.64: from 0.55, 8 of the recordings reach the top 10 and one picture query takes a
- * recording (ein/core#524).
- */
-const CURRENT_TEXT_CONFIDENT = 0.55;
 
 /**
  * How long a query's vector is kept for the next caller with the same text: the providers of one
@@ -131,14 +135,15 @@ const sharedQueryEmbed = async (cmd: Command, space: QuerySpace, query: string):
 };
 
 /**
- * A search query as a vector, the type to search, the floor a hit has to reach and the similarity
- * from which a hit is confident. Callers with the same text share one request.
+ * A search query as a vector, the type to search, and the space's levels: the floor a hit has to
+ * reach, the stricter one, and the similarity from which a hit is confident. Callers with the same
+ * text share one request.
  */
-export const embedQuery = async (cmd: Command, query: string): Promise<{ bytes: Uint8Array; type: string; floor: number; confident: number }> => {
+export const embedQuery = async (cmd: Command, query: string): Promise<{ bytes: Uint8Array } & TextSpace> => {
   const embedded = await sharedQueryEmbed(cmd, 'text', query);
-  const type = textEmbeddingType(embedded.producer);
-  if (!type) throw new Error(`no embedding type for text embedder "${embedded.producer}"`);
-  return { bytes: embedded.bytes, type, floor: CURRENT_TEXT_FLOOR, confident: CURRENT_TEXT_CONFIDENT };
+  const space = TEXT_SPACES[embedded.producer];
+  if (!space) throw new Error(`no embedding type for text embedder "${embedded.producer}"`);
+  return { bytes: embedded.bytes, ...space };
 };
 
 /**
@@ -169,8 +174,18 @@ export const embedForStore = async (cmd: Command, texts: string[], opts: StoreOp
   return { vectors, type, producer };
 };
 
+/** Remove the vectors of every other known type kept under `parent`: what a re-embed leaves behind. */
+const dropOtherTypes = async (cmd: Command, parent: string, type: string): Promise<void> => {
+  for (const name of TEXT_VECTOR_NAMES) {
+    if (name !== type && await cmd.sys.vfs.exists(cmd.access, `${parent}/${name}`)) {
+      await cmd.sys.vfs.unlink(cmd.access, `${parent}/${name}`, parent, { recursive: true });
+    }
+  }
+};
+
 /**
- * Write one vector node at `<parent>/<name>`, replacing what is there.
+ * Write one vector node at `<parent>/<name>`, replacing what is there. A vector named for its type
+ * replaces the other known types' beside it too.
  *
  * A node of another embedding type is removed first rather than retyped: retyping leaves its row
  * in the old type's table. `attrs` ride on the node beside `embeddingType` and `capacity`.
@@ -204,6 +219,7 @@ export const writeTextVector = async (
   } finally {
     await handle.close();
   }
+  if (name === type) await dropOtherTypes(cmd, parent, type);
 };
 
 /**
@@ -299,8 +315,8 @@ export const isContentPartName = (name: string): boolean => /^c\d+$/.test(name);
 
 /**
  * Embed a set of chunks into the current space and keep them under `<parent>/<type>/`, replacing
- * whatever set was there — re-chunked text moves the boundaries, so old names are not a subset of
- * the new ones. The directory is stamped with the producer last, so an interrupted run leaves a
+ * whatever set was there, another model's included — re-chunked text moves the boundaries, so old
+ * names are not a subset of the new ones. The directory is stamped with the producer last, so an interrupted run leaves a
  * directory without `embeddedBy` for the next run to redo. Answers why it did not, or undefined.
  */
 export const storeCurrentChunks = async (
@@ -353,6 +369,7 @@ export const storeCurrentChunks = async (
     }
     const embeddedAt = new Date().toISOString().replace(/\.\d+Z$/, 'Z');
     await cmd.sys.vfs.update(cmd.access, dir, { attrs: { ...attrs, embeddedBy: producer, embeddedAt } });
+    await dropOtherTypes(cmd, parent, type);
     return undefined;
   } catch (error) {
     return error instanceof Error ? error.message : String(error);

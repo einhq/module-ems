@@ -9,7 +9,7 @@ import { EmsError, EmsUnavailableError } from '../lib/client.ts';
 import { embedQuery } from '../lib/text-embedding.ts';
 import { startStubEms } from './stub-ems.ts';
 
-const PRODUCER = 'jina-embeddings-v5-text-small';
+const PRODUCER = 'bge-m3';
 
 /** Minimal Command: env, a VFS with no settings files, and an `interrupted` flag the test can flip. */
 const makeCmd = (url: string) =>
@@ -29,7 +29,9 @@ Deno.test('the providers of one search share one embed of the query', async () =
       embedQuery(makeCmd(stub.url), 'en segelbåt'),
       embedQuery(makeCmd(stub.url), 'en segelbåt'),
     ]);
-    assertEquals([media.type, document.type], ['text_jina5s', 'text_jina5s']);
+    assertEquals([media.type, document.type], ['text_bgem3', 'text_bgem3']);
+    // The floor and the confident level are bge-m3's own scale, not jina's.
+    assertEquals([media.floor, media.confident], [0.50, 0.68]);
     assertEquals(vectorOf(document.bytes), [0.5, 0.5]);
     // A caller after the answer arrived, as the next page's fan-out is, is answered from it too.
     await embedQuery(makeCmd(stub.url), 'en segelbåt');

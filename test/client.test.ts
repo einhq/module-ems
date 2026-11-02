@@ -92,10 +92,10 @@ Deno.test('a streamed request hands over EMS progress before returning its resul
 });
 
 Deno.test('embedTexts returns the vectors and their producer; an interactive caller gives EMS a minute of deadline', async () => {
-  const stub = startStubEms({ ops: { 'text.embed': { result: { embeddings: [[0.1, 0.2]], dimension: 2 }, producer: 'jina-embeddings-v5-text-small' } } });
+  const stub = startStubEms({ ops: { 'text.embed': { result: { embeddings: [[0.1, 0.2]], dimension: 2 }, producer: 'bge-m3' } } });
   try {
     const { cmd } = makeCmd({ CFG_EMS_URL: stub.url });
-    assertEquals(await embedTexts(cmd, ['hello']), { vectors: [[0.1, 0.2]], producer: 'jina-embeddings-v5-text-small' });
+    assertEquals(await embedTexts(cmd, ['hello']), { vectors: [[0.1, 0.2]], producer: 'bge-m3' });
     assertEquals(stub.requests[0].body, { texts: ['hello'], model: 'current', role: 'document' });
     await embedTexts(cmd, ['hello'], { interactive: true, role: 'query' });
     const options = stub.requests[1].body.options as { priority: string; deadline: number };

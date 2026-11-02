@@ -44,13 +44,13 @@ type TextSpace = { type: string; floor: number; strict: number; confident: numbe
 
 /** The text embedders' spaces, by the producer EMS reports. */
 const TEXT_SPACES: Record<string, TextSpace> = {
-  // BAAI/bge-m3 (MIT): 1024 dimensions, stored as halfvec. `floor` and `strict` by the same rules
-  // as jina's 0.35 and 0.50; `confident` passes the same share of the pairs as jina's 0.55, which
-  // recordings found by a paraphrase of what was said in them reached and picture queries' best
-  // transcript hits mostly did not (ein/core#524, #889).
-  'bge-m3': { type: 'text_bgem3', floor: 0.50, strict: 0.66, confident: 0.68 },
-  // jina-embeddings-v5-text-small (CC BY-NC), until fry's texts are re-embedded (ein/core#889).
-  'jina-embeddings-v5-text-small': { type: 'text_jina5s', floor: 0.35, strict: 0.50, confident: 0.55 },
+  // BAAI/bge-m3 (MIT): 1024 dimensions, stored as halfvec. `floor` and `strict` by the rules above,
+  // on the retrieval eval's judged pairs. `confident` cannot be told by similarity on this scale:
+  // on fry, a picture query's best transcript hit (median 0.62) scores as high as the recording a
+  // spoken query paraphrases (median 0.60), so it is set where few picture queries reach it (16 of
+  // 95 from 0.70, against jina's 10 of 87 at 0.55), and only the clearest spoken hits count
+  // (ein/core#889, #524).
+  'bge-m3': { type: 'text_bgem3', floor: 0.50, strict: 0.66, confident: 0.70 },
 };
 
 /**

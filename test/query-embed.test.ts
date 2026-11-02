@@ -31,7 +31,7 @@ Deno.test('the providers of one search share one embed of the query', async () =
     ]);
     assertEquals([media.type, document.type], ['text_bgem3', 'text_bgem3']);
     // The floor and the confident level are bge-m3's own scale, not jina's.
-    assertEquals([media.floor, media.confident], [0.50, 0.68]);
+    assertEquals([media.floor, media.confident], [0.50, 0.70]);
     assertEquals(vectorOf(document.bytes), [0.5, 0.5]);
     // A caller after the answer arrived, as the next page's fan-out is, is answered from it too.
     await embedQuery(makeCmd(stub.url), 'en segelbåt');

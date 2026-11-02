@@ -135,7 +135,7 @@ export type DetectVideoFacesResult = {
 type Fingerprint =
   | { type: 'sscd-image' | 'sscd-video'; dimension: number; vector: number[]; label: string }
   | { type: 'chromaprint'; fingerprint: number[]; label: string };
-/** A file's fingerprints, and what made them (`sscd_disc_mixup`, `fpcalc/…`). */
+/** A file's fingerprints, and what made them (`sscd_disc_mixup`, `ffmpeg/…`). */
 export type FingerprintResult = { fingerprints: Fingerprint[]; producer: string };
 type ExtractedText = { text: string; pages: number; method: string; wordCount: number };
 

@@ -33,24 +33,19 @@ import { embedImageText, embedTexts } from './client.ts';
 
 /**
  * A text embedder's space: its type, the lowest similarity a hit is kept at (`floor`: below it,
- * precision on the retrieval eval's judged pairs falls under one in two), the similarity from
- * which those pairs hold 0.9 precision (`strict`, for a channel that must not guess) and the
- * similarity from which a hit says what the query says (`confident`). Similarities are on each model's own scale,
- * so both move with the model; wow `bench/ems/results/text-embed-2026-11` carries them from one
+ * precision on the retrieval eval's judged pairs falls under one in two) and the similarity from
+ * which those pairs hold 0.9 precision (`strict`, for a channel that must not guess).
+ * Similarities are on each model's own scale, so both move with the model; wow `bench/ems/results/text-embed-2026-11` carries them from one
  * model to the next (`retrieval-eval.py thresholds`). The callers' `-t` threshold is not applied
  * to this space.
  */
-type TextSpace = { type: string; floor: number; strict: number; confident: number };
+type TextSpace = { type: string; floor: number; strict: number };
 
 /** The text embedders' spaces, by the producer EMS reports. */
 const TEXT_SPACES: Record<string, TextSpace> = {
   // BAAI/bge-m3 (MIT): 1024 dimensions, stored as halfvec. `floor` and `strict` by the rules above,
-  // on the retrieval eval's judged pairs. `confident` cannot be told by similarity on this scale:
-  // on fry, a picture query's best transcript hit (median 0.62) scores as high as the recording a
-  // spoken query paraphrases (median 0.60), so it is set where few picture queries reach it (16 of
-  // 95 from 0.70, against jina's 10 of 87 at 0.55), and only the clearest spoken hits count
-  // (ein/core#889, #524).
-  'bge-m3': { type: 'text_bgem3', floor: 0.50, strict: 0.66, confident: 0.70 },
+  // on the retrieval eval's judged pairs.
+  'bge-m3': { type: 'text_bgem3', floor: 0.50, strict: 0.66 },
 };
 
 /**
@@ -136,8 +131,7 @@ const sharedQueryEmbed = async (cmd: Command, space: QuerySpace, query: string):
 
 /**
  * A search query as a vector, the type to search, and the space's levels: the floor a hit has to
- * reach, the stricter one, and the similarity from which a hit is confident. Callers with the same
- * text share one request.
+ * reach and the stricter one. Callers with the same text share one request.
  */
 export const embedQuery = async (cmd: Command, query: string): Promise<{ bytes: Uint8Array } & TextSpace> => {
   const embedded = await sharedQueryEmbed(cmd, 'text', query);

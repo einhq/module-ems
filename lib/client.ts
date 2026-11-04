@@ -703,10 +703,12 @@ type PosterOptions = RenditionsOptions & {
   /** Seconds into the clip; EMS defaults to 1, past the black leader most cameras record. */
   at?: number;
   deinterlace?: boolean;
+  /** For a poster that stands for the whole video: a blank frame at `at` gives way to a later one that shows something. */
+  skipBlank?: boolean;
 };
 
-/** One frame of a video, fitted into rendition targets like a photo. */
-export const poster = async (cmd: Command, path: string, opts: PosterOptions): Promise<RenditionsResult> =>
+/** One frame of a video, fitted into rendition targets like a photo, and the second it was taken at. */
+export const poster = async (cmd: Command, path: string, opts: PosterOptions): Promise<RenditionsResult & { t: number }> =>
   await withHostPaths(cmd, [path, ...opts.targets.map((t) => t.output)], async ([hostPath, ...outputs]) => {
     const body: Record<string, unknown> = {
       file: { ...fileRef(hostPath, opts.angle ?? 0, opts.mirror ?? false), ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) },
@@ -714,8 +716,10 @@ export const poster = async (cmd: Command, path: string, opts: PosterOptions): P
     };
     if (opts.at !== undefined) body.at = opts.at;
     if (opts.deinterlace) body.deinterlace = true;
+    if (opts.skipBlank) body.skip_blank = true;
     const answer = await request(cmd, 'video.poster', body);
-    return renditionsOf(answer.result as { frame: { width: number; height: number }; targets: Rendition[] }, opts.targets, answer);
+    const raw = answer.result as { frame: { width: number; height: number }; targets: Rendition[]; t: number };
+    return { ...renditionsOf(raw, opts.targets, answer), t: raw.t };
   });
 
 type WaveformStyle = { foreground?: string; background?: string; baseline?: string | null; aspect?: number };
@@ -891,15 +895,23 @@ type Shots = {
 };
 
 /** A rule of `video.shots` to set instead of EMS's default: the score a cut must reach. */
-type ShotsOptions = { threshold?: number };
+type ShotsOptions = {
+  threshold?: number;
+  /** False for a video that has no leader, such as a camera's take: no blank stretch is a gap, and none ends in a cut. */
+  leader?: boolean;
+};
 
 /**
  * Where an upright video — a rendition — cuts from one shot to the next: TransNetV2 over every frame,
- * and EMS's rules with their measured defaults, or the threshold the caller gives.
+ * and EMS's rules with their measured defaults, or the threshold and leader rule the caller gives.
  */
 export const videoShots = async (cmd: Command, path: string, opts: ShotsOptions = {}): Promise<Shots> =>
   await withHostPath(cmd, path, async (hostPath) => {
-    const body = { file: { path: hostPath }, ...(opts.threshold !== undefined ? { threshold: opts.threshold } : {}) };
+    const body = {
+      file: { path: hostPath },
+      ...(opts.threshold !== undefined ? { threshold: opts.threshold } : {}),
+      ...(opts.leader !== undefined ? { leader: opts.leader } : {}),
+    };
     const answer = await request(cmd, 'video.shots', body);
     const raw = answer.result as Omit<Shots, 'producer'>;
     return { duration: raw.duration, frames: raw.frames, cuts: raw.cuts ?? [], params: raw.params ?? {}, producer: producerOf(answer) };

@@ -28,9 +28,13 @@ import {
 } from '../lib/client.ts';
 import { startStubEms } from './stub-ems.ts';
 
-/** Minimal Command: env, a VFS with no nodes (every path is already a host path, and no key is set). */
+/**
+ * Minimal Command: env, a VFS with no nodes (every path is already a host path, and no key is set).
+ * `progress` holds what it was told of how much is done.
+ */
 const makeCmd = (env: Record<string, string>, interrupted = false) => {
   const stderr: string[] = [];
+  const progress: number[] = [];
   const noNode = () => Promise.reject(new Error('not a node'));
   const cmd = {
     env,
@@ -42,8 +46,11 @@ const makeCmd = (env: Record<string, string>, interrupted = false) => {
       stderr.push(text);
       return Promise.resolve();
     },
+    progress: (fraction: number) => {
+      progress.push(fraction);
+    },
   } as unknown as Command;
-  return { cmd, stderr };
+  return { cmd, stderr, progress };
 };
 
 Deno.test('transcribe forwards the whisper settings that are set and derives model and signature', async () => {
@@ -175,7 +182,7 @@ Deno.test('the speech ops map EMS shapes onto the client types', async () => {
   }
 });
 
-Deno.test('detectVideoFaces sends the sampling and the gate, and keeps the answer as EMS gave it', async () => {
+Deno.test('detectVideoFaces sends the sampling and the gate, says how far EMS has come, and keeps the answer as EMS gave it', async () => {
   const face = {
     appearances: [[0.5, 9.5]] as [number, number][],
     detections: 9,
@@ -186,11 +193,15 @@ Deno.test('detectVideoFaces sends the sampling and the gate, and keeps the answe
     track: [[4, 0.4, 0.2, 0.1, 0.18]] as [number, number, number, number, number][],
   };
   const result: Omit<DetectVideoFacesResult, 'producer'> = { frame: { width: 1920, height: 1080 }, duration: 63.2, interval: 1, samples: 63, faces: [face] };
-  const stub = startStubEms({ ops: { 'faces.detect_video': { result, producer: 'detector+recogniser' } } });
+  const stub = startStubEms({
+    ops: { 'faces.detect_video': { result, producer: 'detector+recogniser' } },
+    progress: { 'faces.detect_video': ['detect', { phase: 'detect', fraction: 0.4 }, { phase: 'detect', fraction: 0.9 }] },
+  });
   try {
-    const { cmd } = makeCmd({ CFG_EMS_URL: stub.url });
+    const { cmd, progress } = makeCmd({ CFG_EMS_URL: stub.url });
     assertEquals(await detectVideoFaces(cmd, '/f/a.mp4', 90, true, { minSize: 0.02, minConfidence: 0.7 }), { ...result, producer: 'detector+recogniser' });
     assertEquals(stub.requests[0].body, { file: { path: '/f/a.mp4', angle: 90, mirror: true }, min_size: 0.02, min_confidence: 0.7 });
+    assertEquals(progress, [0.4, 0.9], 'how much is done reaches the command');
   } finally {
     await stub.close();
   }

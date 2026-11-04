@@ -249,6 +249,11 @@ type CallOptions = {
   timeoutSeconds?: number;
   priority?: 'interactive';
   onProgress?: (phase: string) => void | Promise<void>;
+  /**
+   * Ask EMS to stream, so the command can say how far the op has come (`cmd.progress`) while it
+   * runs. Set by the ops that take minutes; `onProgress` streams too.
+   */
+  stream?: boolean;
 };
 
 const baseUrl = (cmd: Command): string => (cmd.env.CFG_EMS_URL || DEFAULT_URL).replace(/\/+$/, '');
@@ -323,8 +328,11 @@ const fetchInterruptible = async (cmd: Command, op: string, url: string, init: R
 type Envelope = { ok?: boolean; result?: unknown; error?: { code?: string; message?: string; permanent?: boolean }; meta?: Record<string, unknown> };
 type Answer = { result: unknown; meta?: Record<string, unknown> };
 
-/** Read EMS's SSE form through its terminal result/error event. */
-const streamedEnvelope = async (response: Response, onProgress: NonNullable<CallOptions['onProgress']>): Promise<Envelope> => {
+/**
+ * Read EMS's SSE form through its terminal result/error event. Each progress event's phase goes to
+ * `onProgress`, and its `fraction`, how much of the op is done, to `cmd.progress`.
+ */
+const streamedEnvelope = async (cmd: Command, response: Response, onProgress: CallOptions['onProgress']): Promise<Envelope> => {
   if (!response.body) throw new EmsUnavailableError('ems: streamed request answered with no body');
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -346,8 +354,9 @@ const streamedEnvelope = async (response: Response, onProgress: NonNullable<Call
       throw new EmsUnavailableError(`ems: streamed request returned invalid ${event} data`);
     }
     if (event === 'progress') {
-      const phase = parsed && typeof parsed === 'object' ? (parsed as { phase?: unknown }).phase : undefined;
-      if (typeof phase === 'string') await onProgress(phase);
+      const { phase, fraction } = parsed && typeof parsed === 'object' ? parsed as { phase?: unknown; fraction?: unknown } : {};
+      if (typeof phase === 'string') await onProgress?.(phase);
+      if (typeof fraction === 'number') cmd.progress(fraction);
     } else if (event === 'result' || event === 'error') {
       terminal = parsed as Envelope;
     }
@@ -381,6 +390,7 @@ const request = async (cmd: Command, op: string, body: Record<string, unknown>, 
   // search that gives up should not leave its embedding queued.
   if (waitMs !== undefined) options.deadline = (Date.now() + waitMs) / 1000;
   const payload = Object.keys(options).length > 0 ? { ...body, options } : body;
+  const stream = opts.stream || opts.onProgress !== undefined;
 
   const response = await fetchInterruptible(
     cmd,
@@ -388,7 +398,7 @@ const request = async (cmd: Command, op: string, body: Record<string, unknown>, 
     `${baseUrl(cmd)}/${API_MAJOR}/${op.replace('.', '/')}`,
     {
       method: 'POST',
-      headers: { ...await headers(cmd), ...(opts.onProgress ? { accept: 'text/event-stream' } : {}) },
+      headers: { ...await headers(cmd), ...(stream ? { accept: 'text/event-stream' } : {}) },
       body: JSON.stringify(payload),
     },
     waitMs,
@@ -397,7 +407,7 @@ const request = async (cmd: Command, op: string, body: Record<string, unknown>, 
 
   let envelope: Envelope;
   try {
-    envelope = opts.onProgress ? await streamedEnvelope(response, opts.onProgress) : await response.json() as Envelope;
+    envelope = stream ? await streamedEnvelope(cmd, response, opts.onProgress) : await response.json() as Envelope;
   } catch (error) {
     if (error instanceof EmsUnavailableError) throw error;
     throw new EmsUnavailableError(`ems: ${op} answered ${response.status} with no usable body`);
@@ -588,7 +598,7 @@ export const detectVideoFaces = async (
     if (opts.interval !== undefined) body.interval = opts.interval;
     if (opts.minSize !== undefined) body.min_size = opts.minSize;
     if (opts.minConfidence !== undefined) body.min_confidence = opts.minConfidence;
-    const raw = await request(cmd, 'faces.detect_video', body, { onProgress: opts.onProgress });
+    const raw = await request(cmd, 'faces.detect_video', body, { onProgress: opts.onProgress, stream: true });
     return { ...(raw.result as Omit<DetectVideoFacesResult, 'producer'>), producer: producerOf(raw) };
   });
 

@@ -26,8 +26,8 @@ export type StubOptions = {
   capabilities?: Record<string, unknown>;
   /** Delay every answer, for timeout tests. */
   delayMs?: number;
-  /** SSE progress phases to send before the terminal answer, by operation. */
-  progress?: Record<string, string[]>;
+  /** SSE progress events to send before the terminal answer, by operation: a phase, or a phase and how much is done. */
+  progress?: Record<string, (string | { phase: string; fraction: number })[]>;
   /** Pause before each SSE event, for callers that need to observe intermediate phases. */
   progressDelayMs?: number;
 };
@@ -92,7 +92,7 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
     const resolved = typeof reply === 'function' ? await reply(body) : reply;
     const { status, body: answer } = envelope(resolved);
     if (req.headers.get('accept')?.includes('text/event-stream')) {
-      const events = (options.progress?.[op] ?? []).map((phase) => `event: progress\ndata: ${JSON.stringify({ phase })}\n\n`);
+      const events = (options.progress?.[op] ?? []).map((event) => `event: progress\ndata: ${JSON.stringify(typeof event === 'string' ? { phase: event } : event)}\n\n`);
       events.push(`event: ${'error' in resolved ? 'error' : 'result'}\ndata: ${JSON.stringify(answer)}\n\n`);
       const encoder = new TextEncoder();
       const stream = new ReadableStream({

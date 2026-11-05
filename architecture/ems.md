@@ -40,7 +40,7 @@ at that budget — and `generate-derivatives` records the refusal on the file no
 EMS's budget signature (`capabilities.encode.cpu_budget`), so `media-scan` stops announcing a gap
 nothing will close until the budget on EMS is raised, which makes the signature stale and re-opens
 it on its own. The budget lives in EMS's environment (`EMS_CPU_ENCODE_*`). Audio renditions are
-AAC in an `M4A`-branded MP4, with the bitrate and sample rate in `sizes.yaml` as ceilings against
+AAC in an `M4A`-branded MP4, with the bitrate and sample rate of the rendition table's audio role as ceilings against
 the source and a remux when the source is already AAC in an MP4-family container.
 
 **Sharing a host.** EMS runs as a container of its own beside EiN's. The two name the same four

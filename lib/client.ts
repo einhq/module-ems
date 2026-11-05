@@ -68,8 +68,8 @@ export type TranscribeResult = {
   audio: boolean;
   model: string;
   /**
-   * Every setting that decided this output, as one string. `transcribeSignature` says what a
-   * decode would write *now*; the two differing marks a transcript to redo.
+   * Every setting that decided this output, as one string. `generations`' `transcribe` says what
+   * a decode would write *now*; the two differing marks a transcript to redo.
    */
   signature: string;
   speech: boolean;
@@ -784,7 +784,7 @@ type VideoTranscodeResult = {
  * EMS runs the whole ladder (everything in VRAM, a CPU decode into NVENC, the CPU alone), the
  * projected CPU-decode budget and the windowed encode; a source it cannot make the rendition
  * of at its budget comes back as an `EmsError` with code `refused`, permanent — see
- * `transcodeBudget` for what to record beside it.
+ * `generations`' `cpuBudget` for what to record beside it.
  */
 export const transcodeVideo = async (cmd: Command, path: string, opts: VideoTranscodeOptions): Promise<VideoTranscodeResult> =>
   await withHostPaths(cmd, [path, opts.output], async ([hostPath, output]) => {
@@ -1111,71 +1111,57 @@ const get = async (cmd: Command, path: string, waitSeconds = 5): Promise<unknown
 };
 
 /**
- * The `signature` a transcript decoded right now would carry, or null when EMS is not
- * answering. Null disables the staleness check in the caller rather than guessing.
+ * What EMS stamps the results it makes with now. A stored result stamped otherwise was made by
+ * something EMS no longer runs, in another space or with other settings, and is made again. A
+ * field is null when EMS runs no such thing, or, for `transcribe`, while its model worker is down.
  */
-export const transcribeSignature = async (cmd: Command): Promise<string | null> => {
-  const capabilities = await get(cmd, 'capabilities') as { signatures?: { transcribe?: unknown } } | null;
-  const signature = capabilities?.signatures?.transcribe;
-  return typeof signature === 'string' && signature ? signature : null;
+type Generations = {
+  /** The `signature` a transcript decoded now would carry (`transcribedWith`). */
+  transcribe: string | null;
+  /**
+   * The signature of the CPU-decode budget EMS refuses transcodes against. Recorded beside a
+   * refusal so a raised budget re-opens the gap on its own: a refusal counts only while the
+   * signature it carries is the one in force.
+   */
+  cpuBudget: string | null;
+  /** The image embedder `vision.embed` runs (`embeddedBy` of a picture vector). */
+  imageEmbed: string | null;
+  /** The face models `faces.detect` runs (`facesBy`). */
+  faces: string | null;
+  /** The engine `ocr.read` reads pictures with (`ocrBy`). */
+  ocr: string | null;
+  /** The text embedder `text.embed` runs (`embeddedBy` of a text vector). */
+  textEmbed: string | null;
 };
 
 /**
- * The signature of the CPU-decode budget EMS refuses transcodes against, or null when it
- * cannot be asked. Recorded beside a refusal so a raised budget re-opens the gap on its own: a
- * refusal counts only while the signature it carries is the one in force.
+ * Everything EMS stamps its results with now, from one `capabilities` request, or null when EMS is
+ * not answering. Null is not "none of them": a caller comparing stored results with these cannot
+ * tell which are stale, where a null field says EMS runs no such thing. A batch caller passes a
+ * longer wait: capabilities asks the model worker, which answers slowly while it loads its models.
  */
-export const transcodeBudget = async (cmd: Command): Promise<string | null> => {
-  const capabilities = await get(cmd, 'capabilities') as { encode?: { cpu_budget?: unknown } } | null;
-  const budget = capabilities?.encode?.cpu_budget;
-  return typeof budget === 'string' && budget.length > 0 ? budget : null;
-};
+export const generations = async (cmd: Command, waitSeconds?: number): Promise<Generations | null> => {
+  const capabilities = await get(cmd, 'capabilities', waitSeconds) as {
+    signatures?: { transcribe?: unknown };
+    encode?: { cpu_budget?: unknown };
+    models?: { image_embed?: unknown; faces?: unknown; ocr?: unknown; text_embed?: unknown };
+    ops?: unknown;
+  } | null;
+  if (!capabilities || typeof capabilities !== 'object') return null;
 
-/**
- * The image embedder EMS runs now (`capabilities.models.image_embed`), or null when it is not
- * answering or has none. A picture whose `embeddedBy` differs holds a vector from another model,
- * in another space: it is re-embedded, never searched beside the new ones.
- */
-export const imageEmbedGeneration = async (cmd: Command): Promise<string | null> => {
-  const capabilities = await get(cmd, 'capabilities') as { models?: { image_embed?: unknown }; ops?: unknown } | null;
-  const model = capabilities?.models?.image_embed;
-  const ops = Array.isArray(capabilities?.ops) ? capabilities.ops : [];
-  return typeof model === 'string' && model && ops.includes('vision.embed') ? model : null;
-};
+  const named = (value: unknown): string | null => typeof value === 'string' && value ? value : null;
+  const ops = Array.isArray(capabilities.ops) ? capabilities.ops : [];
+  const ran = (op: string, value: unknown): string | null => ops.includes(op) ? named(value) : null;
+  const models = capabilities.models ?? {};
 
-/**
- * The face models EMS runs now (`capabilities.models.faces`), or null when it is not answering or
- * runs no `faces.detect`. A file whose faces were found by others holds vectors in another space:
- * its faces are detected again, never compared with the new ones.
- */
-export const faceGeneration = async (cmd: Command): Promise<string | null> => {
-  const capabilities = await get(cmd, 'capabilities') as { models?: { faces?: unknown }; ops?: unknown } | null;
-  const model = capabilities?.models?.faces;
-  const ops = Array.isArray(capabilities?.ops) ? capabilities.ops : [];
-  return typeof model === 'string' && model && ops.includes('faces.detect') ? model : null;
-};
-
-/**
- * The engine `ocr.read` reads pictures with now (`capabilities.models.ocr`), or null when EMS is not
- * answering or runs no such op. A picture whose `ocrBy` differs was read by another and is read again.
- */
-export const ocrGeneration = async (cmd: Command): Promise<string | null> => {
-  const capabilities = await get(cmd, 'capabilities') as { models?: { ocr?: unknown }; ops?: unknown } | null;
-  const model = capabilities?.models?.ocr;
-  const ops = Array.isArray(capabilities?.ops) ? capabilities.ops : [];
-  return typeof model === 'string' && model && ops.includes('ocr.read') ? model : null;
-};
-
-/**
- * The text embedder `text.embed` runs now (`capabilities.models.text_embed`), or null when EMS is
- * not answering. A vector whose `embeddedBy` differs is from another model, in another space, and
- * is embedded again. A batch caller passes a longer wait: capabilities asks the model worker,
- * which answers slowly while it loads its models.
- */
-export const textEmbedGeneration = async (cmd: Command, waitSeconds?: number): Promise<string | null> => {
-  const capabilities = await get(cmd, 'capabilities', waitSeconds) as { models?: { text_embed?: unknown } } | null;
-  const model = capabilities?.models?.text_embed;
-  return typeof model === 'string' && model ? model : null;
+  return {
+    transcribe: named(capabilities.signatures?.transcribe),
+    cpuBudget: named(capabilities.encode?.cpu_budget),
+    imageEmbed: ran('vision.embed', models.image_embed),
+    faces: ran('faces.detect', models.faces),
+    ocr: ran('ocr.read', models.ocr),
+    textEmbed: named(models.text_embed),
+  };
 };
 
 /** EMS health, or null when it is not answering. */

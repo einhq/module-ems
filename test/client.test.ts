@@ -19,11 +19,10 @@ import {
   EmsError,
   EmsUnavailableError,
   extractText,
-  faceGeneration,
   fingerprint,
+  generations,
   health,
   transcribe,
-  transcribeSignature,
   voiceprint,
 } from '../lib/client.ts';
 import { startStubEms } from './stub-ems.ts';
@@ -267,7 +266,7 @@ Deno.test('no EMS at all is unavailability, never an exception of another shape'
   const { cmd } = makeCmd({ CFG_EMS_URL: 'http://127.0.0.1:1', CFG_EMS_CONNECT_RETRY: '0' });
   await assertRejects(() => embedTexts(cmd, ['x']), EmsUnavailableError, 'unreachable');
   assertEquals(await health(cmd), null);
-  assertEquals(await transcribeSignature(cmd), null);
+  assertEquals(await generations(cmd), null);
 });
 
 Deno.test('a refused connection is retried until EMS is back, for batch calls only', async () => {
@@ -320,7 +319,7 @@ Deno.test('an interrupted command drops its request', async () => {
   }
 });
 
-Deno.test('health and the transcribe signature come from the system endpoints', async () => {
+Deno.test('health and the generations come from the system endpoints', async () => {
   const stub = startStubEms({
     health: { models: { whisper: { loaded: true, device: 'cuda' } }, degraded: [{ what: 'gpu', reason: 'sticky CUDA error' }] },
     capabilities: { signatures: { transcribe: 'whisper-large-v3:vad=0.2/400/500,nospeech=0.6,lang=auto,words=0' } },
@@ -330,7 +329,14 @@ Deno.test('health and the transcribe signature come from the system endpoints', 
     const status = await health(cmd);
     assertEquals(status?.models.whisper, { loaded: true, device: 'cuda' });
     assertEquals(status?.degraded?.[0].what, 'gpu');
-    assertEquals(await transcribeSignature(cmd), 'whisper-large-v3:vad=0.2/400/500,nospeech=0.6,lang=auto,words=0');
+    assertEquals(await generations(cmd), {
+      transcribe: 'whisper-large-v3:vad=0.2/400/500,nospeech=0.6,lang=auto,words=0',
+      cpuBudget: null,
+      imageEmbed: null,
+      faces: null,
+      ocr: null,
+      textEmbed: null,
+    });
   } finally {
     await stub.close();
   }
@@ -340,8 +346,8 @@ Deno.test('the face models are the ones capabilities names, and none without fac
   const running = startStubEms({ ops: { 'faces.detect': { result: {} } }, capabilities: { models: { faces: 'detector+recogniser' } } });
   const without = startStubEms({ capabilities: { models: { faces: 'detector+recogniser' } } });
   try {
-    assertEquals(await faceGeneration(makeCmd({ CFG_EMS_URL: running.url }).cmd), 'detector+recogniser');
-    assertEquals(await faceGeneration(makeCmd({ CFG_EMS_URL: without.url }).cmd), null);
+    assertEquals((await generations(makeCmd({ CFG_EMS_URL: running.url }).cmd))?.faces, 'detector+recogniser');
+    assertEquals((await generations(makeCmd({ CFG_EMS_URL: without.url }).cmd))?.faces, null);
   } finally {
     await running.close();
     await without.close();

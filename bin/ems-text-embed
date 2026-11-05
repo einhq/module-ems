@@ -11,7 +11,7 @@
 import type { TextEmbedding } from '@ein/api';
 import type { CmdReturn, Command } from '@ein/client';
 import { collectUnknownFlags, parseArgs, reportUnknownFlags } from '@ein/client';
-import { embedTexts, textEmbedGeneration } from '@ems/client';
+import { embedTexts, generations } from '@ems/client';
 
 const emsTextEmbed = async (cmd: Command): CmdReturn => {
   const unknown: string[] = [];
@@ -19,7 +19,7 @@ const emsTextEmbed = async (cmd: Command): CmdReturn => {
   if (await reportUnknownFlags(cmd, unknown)) return 1;
 
   if (flags.model) {
-    const model = await textEmbedGeneration(cmd).catch(() => null);
+    const model = (await generations(cmd).catch(() => null))?.textEmbed;
     if (!model) {
       await cmd.writeError('ems-text-embed: EMS cannot say which text model it has\n');
       return 1;

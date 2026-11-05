@@ -64,8 +64,7 @@ sizes, the face boxes, the speakers' turns) arrives as a request parameter.
 The `ems` module here is the client side. [@ems/client](../lib/client.ts) is one
 function per op — `transcribe`, `embedTexts`, `embedImage`, `embedImageText`, `detectFaces`,
 `voiceprint`, `activeSpeakers`, `fingerprint`, `extractText`, `probe`, the renditions and the
-transcodes, plus `health` and what `capabilities` says (`transcribeSignature`,
-`imageEmbedGeneration`, `textEmbedGeneration`, `transcodeBudget`) — and resolves
+transcodes, plus `health` and what `capabilities` says each result is stamped with now (`generations`) — and resolves
 every VFS path to its physical one through `withHostPath` before sending it, staging a db-tier node
 into `/files-tmp`. Three outcomes stay distinct for everything downstream:
 `EmsUnavailableError` (unreachable, timed out, interrupted, `busy`, or a model worker still loading —

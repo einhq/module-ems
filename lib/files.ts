@@ -35,13 +35,20 @@ export type FilesEndpoint = {
   hostKey: string;
 };
 
-type FilesState = { endpoint?: FilesEndpoint; grants: Map<string, Grant> };
+/**
+ * `grants` by path; `parents` counts, for each directory above a granted path, the grants beneath
+ * it, so that a client which looks a path up one component at a time (sshfs) can stat its way down.
+ */
+type FilesState = { endpoint?: FilesEndpoint; grants: Map<string, Grant>; parents: Map<string, number> };
 
 const STATE = Symbol.for('ein.ems.files');
 
 export const filesState = (): FilesState => {
   const global = globalThis as unknown as Record<symbol, FilesState | undefined>;
-  return global[STATE] ??= { grants: new Map() };
+  const state = global[STATE] ??= { grants: new Map(), parents: new Map() };
+  // The process may hold a state from a copy of this file that counted no parents.
+  state.parents ??= new Map();
+  return state;
 };
 
 /** The paths an EMS request body names. */
@@ -83,8 +90,17 @@ export const requestPaths = (body: unknown): RequestPaths => {
 };
 
 /** Grant `paths` until the returned function is called; calling it again does nothing. */
+/** Every directory above `path`, `/` included. */
+const parentsOf = (path: string): string[] => {
+  const parents: string[] = [];
+  for (let parent = dirname(path);; parent = dirname(parent)) {
+    parents.push(parent);
+    if (parent === '/') return parents;
+  }
+};
+
 export const grant = (paths: RequestPaths): () => void => {
-  const grants = filesState().grants;
+  const { grants, parents } = filesState();
   const taken: [string, keyof Grant][] = [
     ...paths.read.map((path) => [path, 'read'] as [string, keyof Grant]),
     ...paths.write.map((path) => [path, 'write'] as [string, keyof Grant]),
@@ -94,6 +110,7 @@ export const grant = (paths: RequestPaths): () => void => {
     const entry = grants.get(path) ?? { read: 0, write: 0, files: 0 };
     entry[kind] += 1;
     grants.set(path, entry);
+    for (const parent of parentsOf(path)) parents.set(parent, (parents.get(parent) ?? 0) + 1);
   }
   let released = false;
   return () => {
@@ -104,6 +121,11 @@ export const grant = (paths: RequestPaths): () => void => {
       if (!entry) continue;
       entry[kind] -= 1;
       if (entry.read + entry.write + entry.files <= 0) grants.delete(path);
+      for (const parent of parentsOf(path)) {
+        const left = (parents.get(parent) ?? 1) - 1;
+        if (left > 0) parents.set(parent, left);
+        else parents.delete(parent);
+      }
     }
   };
 };
@@ -111,15 +133,16 @@ export const grant = (paths: RequestPaths): () => void => {
 /**
  * Whether a canonical path may be opened to `read` or to `write`, or have its attributes read
  * (`stat`): an input is read, an output or a file in a granted directory written, and anything
- * granted, a granted directory itself too, may be stat'ed.
+ * granted may be stat'ed, a granted directory and the directories above a grant too. `/` always
+ * may: a client checks it when it mounts.
  */
 export const granted = (path: string, want: 'read' | 'write' | 'stat'): boolean => {
-  const grants = filesState().grants;
+  const { grants, parents } = filesState();
   const entry = grants.get(path);
   if (want === 'read') return (entry?.read ?? 0) > 0;
   const inDirectory = (grants.get(dirname(path))?.files ?? 0) > 0;
   if (want === 'write') return (entry?.write ?? 0) > 0 || inDirectory;
-  return entry !== undefined || inDirectory;
+  return entry !== undefined || inDirectory || path === '/' || parents.has(path);
 };
 
 /** Whether a canonical path is a directory granted to have files written into it. */

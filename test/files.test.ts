@@ -38,13 +38,17 @@ Deno.test('grant: counted per request, gone when the last one ends', () => {
   assert(granted('/a/frames/f-1.jpg', 'write'));
   assert(!granted('/a/frames/sub/f-1.jpg', 'write'));
   assert(granted('/a/frames', 'stat'));
+  assert(granted('/a', 'stat') && granted('/', 'stat'));
+  assert(!granted('/a', 'read') && !granted('/b', 'stat'));
   first();
   first();
   assert(granted('/a/in', 'read'));
   assert(!granted('/a/out', 'write'));
   second();
   assert(!granted('/a/in', 'read'));
+  assert(!granted('/a', 'stat') && granted('/', 'stat'));
   assertEquals(filesState().grants.size, 0);
+  assertEquals(filesState().parents.size, 0);
 });
 
 Deno.test('forRequest: no header and no grant unless ems-files serves that media service', () => {

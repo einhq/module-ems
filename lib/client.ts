@@ -395,7 +395,7 @@ const request = async (cmd: Command, op: string, body: Record<string, unknown>, 
   const stream = opts.stream || opts.onProgress !== undefined;
   // An EMS without EiN's mounts reaches the request's files through ems-files, for as long as the
   // answer takes: it sends back what it wrote before it answers.
-  const files = forRequest(emsUrl(cmd), payload);
+  const files = await forRequest(emsUrl(cmd), payload);
 
   let response: Response;
   let envelope: Envelope;
@@ -407,7 +407,7 @@ const request = async (cmd: Command, op: string, body: Record<string, unknown>, 
       {
         method: 'POST',
         headers: { ...await headers(cmd), ...files.headers, ...(stream ? { accept: 'text/event-stream' } : {}) },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(files.body),
       },
       waitMs,
       opts.priority !== 'interactive',

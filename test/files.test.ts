@@ -51,9 +51,10 @@ Deno.test('grant: counted per request, gone when the last one ends', () => {
   assertEquals(filesState().parents.size, 0);
 });
 
-Deno.test('forRequest: no header and no grant unless ems-files serves that media service', () => {
-  const none = forRequest(EMS_URL, { file: { path: '/x' } });
+Deno.test('forRequest: no header and no grant unless ems-files serves that media service', async () => {
+  const none = await forRequest(EMS_URL, { file: { path: '/x' } });
   assertEquals(none.headers, {});
+  assertEquals(none.body, { file: { path: '/x' } });
   assert(!granted('/x', 'read'));
   none.release();
 });
@@ -103,7 +104,7 @@ Deno.test({
 
     const server = new FilesServer({ port: 0, address: 'ein.test:2224', emsUrl: EMS_URL });
     const port = await server.start();
-    const request = forRequest(EMS_URL, {
+    const request = await forRequest(EMS_URL, {
       file: { path: `${root}/in/photo.jpg` },
       targets: [{ output: { path: `${root}/out/small.avif` } }],
       output: { dir: `${root}/frames` },
@@ -119,10 +120,12 @@ Deno.test({
         assert(named.hostkey.startsWith('ssh-ed25519 '));
       });
 
-      await t.step('an input is read, through a link as well', async () => {
-        assertEquals(new TextDecoder().decode(await sftp.readFile(`${root}/in/photo.jpg`)), 'original bytes');
-        assertEquals(new TextDecoder().decode(await sftp.readFile(`${root}/in/linked.jpg`)), 'original bytes');
-        assertEquals((await sftp.stat(`${root}/in/photo.jpg`)).size, 'original bytes'.length);
+      await t.step('an input is sent and granted as the file its link leads to', async () => {
+        const real = await Deno.realPath(`${root}/in/photo.jpg`);
+        assertEquals((request.body as { second: { file: { path: string } } }).second.file.path, real);
+        assertEquals(new TextDecoder().decode(await sftp.readFile(real)), 'original bytes');
+        assertEquals((await sftp.stat(real)).size, 'original bytes'.length);
+        await assertRejects(() => sftp.readFile(`${root}/in/linked.jpg`));
       });
 
       await t.step('anything not granted is refused: other files, listings, writing an input', async () => {
@@ -145,7 +148,13 @@ Deno.test({
         assertEquals([...Deno.readDirSync(`${root}/out`)].map((entry) => entry.name), ['small.avif']);
       });
 
-      await t.step('a granted directory is made, and takes files directly inside it', async () => {
+      await t.step('a granted directory may be made, and no other', async () => {
+        await sftp.mkdir(`${root}/frames`);
+        assert(Deno.statSync(`${root}/frames`).isDirectory);
+        await assertRejects(() => sftp.mkdir(`${root}/elsewhere`));
+      });
+
+      await t.step('a granted directory takes files directly inside it', async () => {
         await sftp.writeFile(`${root}/frames/frame-001.jpg`, new TextEncoder().encode('frame'));
         assertEquals(await Deno.readTextFile(`${root}/frames/frame-001.jpg`), 'frame');
         await assertRejects(() => sftp.writeFile(`${root}/frames/sub/frame-002.jpg`, new TextEncoder().encode('frame')));

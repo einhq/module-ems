@@ -152,12 +152,37 @@ export const grantedDirectory = (path: string): boolean => (filesState().grants.
 export const headerValue = (endpoint: FilesEndpoint): string => `address=${endpoint.address}; user=${endpoint.user}; secret=${endpoint.secret}; hostkey=${endpoint.hostKey}`;
 
 /**
- * For one request to `emsUrl`: the header naming the endpoint and the grant of the body's paths,
- * which `release` ends. Nothing is granted and no header sent while `ems-files` does not serve,
- * or when the request goes to another media service than the one it serves.
+ * A request body with every input (`file.path`) named by the file it leads to, where it is a link:
+ * EMS reads an original through its mount under the original's own name, whose extension tools
+ * pick a format by. An input that is not on this host's disk keeps its path.
  */
-export const forRequest = (emsUrl: string, body: unknown): { headers: Record<string, string>; release: () => void } => {
+export const withRealInputs = async (body: unknown): Promise<unknown> => {
+  const real = async (value: unknown): Promise<unknown> => {
+    if (Array.isArray(value)) return await Promise.all(value.map(real));
+    if (!value || typeof value !== 'object') return value;
+    const out: Record<string, unknown> = {};
+    for (const [key, child] of Object.entries(value)) {
+      if (key === 'file' && child && typeof child === 'object' && typeof (child as { path?: unknown }).path === 'string') {
+        const ref = child as Record<string, unknown>;
+        out[key] = { ...ref, path: await Deno.realPath(ref.path as string).catch(() => ref.path) };
+      } else {
+        out[key] = await real(child);
+      }
+    }
+    return out;
+  };
+  return await real(body);
+};
+
+/**
+ * For one request to `emsUrl`: the body to send, its inputs named by their real paths
+ * (`withRealInputs`), the header naming the endpoint, and the grant of the body's paths, which
+ * `release` ends. The body goes as it was, nothing granted and no header sent, while `ems-files`
+ * does not serve, or when the request goes to another media service than the one it serves.
+ */
+export const forRequest = async <T>(emsUrl: string, body: T): Promise<{ body: T; headers: Record<string, string>; release: () => void }> => {
   const endpoint = filesState().endpoint;
-  if (!endpoint || endpoint.emsUrl !== emsUrl) return { headers: {}, release: () => {} };
-  return { headers: { 'ems-files': headerValue(endpoint) }, release: grant(requestPaths(body)) };
+  if (!endpoint || endpoint.emsUrl !== emsUrl) return { body, headers: {}, release: () => {} };
+  const real = await withRealInputs(body) as T;
+  return { body: real, headers: { 'ems-files': headerValue(endpoint) }, release: grant(requestPaths(real)) };
 };

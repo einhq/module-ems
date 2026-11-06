@@ -7,7 +7,7 @@
  * and is written in place, truncated first: a client that writes through a mount (sshfs) has its
  * writes on disk when its close returns, while the SFTP close may come later, so nothing waits for
  * that close. A file in a granted directory is written the same way, the directory made when
- * missing. A directory is never listed, and nothing is removed, renamed, linked or changed in its
+ * missing or asked for. A directory is never listed, and nothing is removed, renamed, linked or changed in its
  * attributes: each of those is refused.
  *
  * A grant is checked when a path is opened or stat'ed; a handle already open stays usable after its
@@ -113,6 +113,7 @@ export class FilesSession {
     sftp.on('LSTAT', (reqId: number, path: string) => void this.stat(reqId, path));
     sftp.on('REALPATH', (reqId: number, path: string) => void this.realpath(reqId, path));
     sftp.on('OPENDIR', (reqId: number) => this.refuse(reqId, 'listing'));
+    sftp.on('MKDIR', (reqId: number, path: string) => void this.mkdir(reqId, path));
   }
 
   private refuse(reqId: number, what: string): void {
@@ -281,6 +282,18 @@ export class FilesSession {
     let path = canonical(filename.startsWith('/') ? filename : `/${filename}`) ?? '/';
     if (granted(path, 'stat')) path = await Deno.realPath(path).catch(() => path);
     this.out.name(reqId, { filename: path, longname: path, attrs: {} });
+  }
+
+  /** A granted directory made, with what is missing above it; any other is refused. */
+  private async mkdir(reqId: number, filename: string): Promise<void> {
+    const path = canonical(filename);
+    if (!path || !grantedDirectory(path)) return this.refuse(reqId, `mkdir ${filename}`);
+    try {
+      await Deno.mkdir(path, { recursive: true });
+      this.out.status(reqId, STATUS_CODE.OK);
+    } catch (error) {
+      this.out.status(reqId, statusOf(error));
+    }
   }
 
   private async close(reqId: number, entry: Open): Promise<void> {

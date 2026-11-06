@@ -4,11 +4,11 @@
  *
  * A path is a file on this host's disk, opened as named and following its links, so an original
  * kept elsewhere is read where its bytes are. An input opens read-only. An output opens write-only
- * and is always written whole: the bytes go to a temporary file beside it, which replaces it when
- * the client closes the handle, so nobody reads half of one; a handle left open when the session
- * ends is thrown away. A file in a granted directory is written the same way, the directory made
- * when missing. A directory is never listed, and nothing is removed, renamed, linked or changed in
- * its attributes: each of those is refused.
+ * and is written in place, truncated first: a client that writes through a mount (sshfs) has its
+ * writes on disk when its close returns, while the SFTP close may come later, so nothing waits for
+ * that close. A file in a granted directory is written the same way, the directory made when
+ * missing. A directory is never listed, and nothing is removed, renamed, linked or changed in its
+ * attributes: each of those is refused.
  *
  * A grant is checked when a path is opened or stat'ed; a handle already open stays usable after its
  * request ends, until the client closes it or the session ends.
@@ -38,7 +38,7 @@ type Open = {
   position: number;
   queued: Queued[];
   draining: boolean;
-} & ({ kind: 'read' } | { kind: 'write'; temp: string; target: string });
+} & { kind: 'read' | 'write' };
 
 /** The answers a session sends, which go nowhere once it has ended. */
 type Replies = Pick<SFTP, 'status' | 'handle' | 'data' | 'attrs' | 'name'>;
@@ -65,8 +65,6 @@ const statusOf = (error: unknown): number => {
   if (error instanceof Deno.errors.PermissionDenied || error instanceof Deno.errors.IsADirectory) return STATUS_CODE.PERMISSION_DENIED;
   return STATUS_CODE.FAILURE;
 };
-
-const randomName = (): string => Array.from(crypto.getRandomValues(new Uint8Array(8)), (b) => b.toString(16).padStart(2, '0')).join('');
 
 /** One SFTP session's handles; `attach` wires it to the session and cleans up when it ends. */
 export class FilesSession {
@@ -200,9 +198,8 @@ export class FilesSession {
       if (!granted(path, 'write')) return this.refuse(reqId, `write ${path}`);
       const directory = dirname(path);
       if (grantedDirectory(directory)) await Deno.mkdir(directory, { recursive: true });
-      const temp = `${directory}/.ems-files-${randomName()}`;
-      const file = await Deno.open(temp, { write: true, createNew: true });
-      this.out.handle(reqId, this.keep({ kind: 'write', file, temp, target: path, position: 0, queued: [], draining: false }));
+      const file = await Deno.open(path, { write: true, create: true, truncate: true });
+      this.out.handle(reqId, this.keep({ kind: 'write', file, position: 0, queued: [], draining: false }));
     } catch (error) {
       this.out.status(reqId, statusOf(error));
     }
@@ -289,29 +286,27 @@ export class FilesSession {
   private async close(reqId: number, entry: Open): Promise<void> {
     try {
       entry.file.close();
-      if (entry.kind === 'write') await Deno.rename(entry.temp, entry.target);
       this.out.status(reqId, STATUS_CODE.OK);
     } catch (error) {
-      if (entry.kind === 'write') await Deno.remove(entry.temp).catch(() => {});
       this.out.status(reqId, statusOf(error));
     }
   }
 
-  /** End the session: each handle it left open is closed after what it queued, and an output it never finished thrown away. */
+  /** End the session: each handle it left open is closed after what it queued. */
   async closeAll(): Promise<void> {
     this.ended = true;
     const left = [...this.handles.values()];
     this.handles.clear();
     await Promise.all(left.map((entry) => {
       const { promise, resolve } = Promise.withResolvers<void>();
-      const discard = async () => {
+      const discard = () => {
         try {
           entry.file.close();
         } catch {
           // Closed already.
         }
-        if (entry.kind === 'write') await Deno.remove(entry.temp).catch(() => {});
         resolve();
+        return Promise.resolve();
       };
       entry.queued.push({ op: 'other', run: discard });
       if (!entry.draining) {

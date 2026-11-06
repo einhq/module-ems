@@ -136,9 +136,12 @@ Deno.test({
         assertEquals(await Deno.readTextFile(`${root}/in/photo.jpg`), 'original bytes');
       });
 
-      await t.step('an output is replaced whole, and no temporary file stays behind', async () => {
-        await sftp.writeFile(`${root}/out/small.avif`, new TextEncoder().encode('rendition'));
+      await t.step('an output is written in place, truncated, its bytes there before the handle closes', async () => {
+        await Deno.writeTextFile(`${root}/out/small.avif`, 'an older and longer rendition');
+        const handle = await sftp.open(`${root}/out/small.avif`, 'w');
+        await sftp.write(handle, new TextEncoder().encode('rendition'), 0, 9, 0);
         assertEquals(await Deno.readTextFile(`${root}/out/small.avif`), 'rendition');
+        await sftp.close(handle);
         assertEquals([...Deno.readDirSync(`${root}/out`)].map((entry) => entry.name), ['small.avif']);
       });
 

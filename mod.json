@@ -11,6 +11,7 @@
     "./text-embedding": "./lib/text-embedding.ts"
   },
   "imports": {
+    "@ems/files": "./lib/files.ts",
     "@ems/files-server": "./lib/files-server.ts",
     "@ems/gpu": "./lib/gpu.ts",
     "@ems/status": "./lib/status.ts",

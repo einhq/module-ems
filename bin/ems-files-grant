@@ -1,0 +1,73 @@
+#!ts
+/**
+ * ems-files-grant — grant paths through the `ems-files` service for a while, and print the
+ * `EMS-Files` header that reaches them, to try a media service's way to EiN's files by hand: from
+ * another host, or with sshfs or sftp in place of EMS.
+ *
+ * The paths are physical ones, as EMS is sent them: `--read` a file to read, `--write` a file to
+ * write, `--dir` a directory to write files into. The grant ends after `--seconds`, as a request's
+ * ends with its answer.
+ */
+
+import type { CmdReturn, Command } from '@ein/client';
+import { collectUnknownFlags, parseArgs, reportUnknownFlags } from '@ein/client';
+import { canonical, filesState, grant, headerValue } from '@ems/files';
+
+const DEFAULT_SECONDS = 300;
+
+const emsFilesGrant = async (cmd: Command): CmdReturn => {
+  const unknown: string[] = [];
+  const flags = parseArgs(cmd.args, {
+    string: ['read', 'write', 'dir', 'seconds'],
+    collect: ['read', 'write', 'dir'],
+    unknown: collectUnknownFlags(unknown),
+  });
+  if (await reportUnknownFlags(cmd, unknown)) return 1;
+  const endpoint = filesState().endpoint;
+  if (!endpoint) {
+    await cmd.writeError('ems-files-grant: ems-files serves nothing (CFG_EMS_FILES_ADDRESS is empty, or the service is not running)\n');
+    return 1;
+  }
+  const seconds = Number(flags.seconds ?? DEFAULT_SECONDS);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    await cmd.writeError(`ems-files-grant: --seconds: not a number of seconds: ${flags.seconds}\n`);
+    return 1;
+  }
+  const paths = { read: [] as string[], write: [] as string[], dirs: [] as string[] };
+  for (const [flag, list] of [['read', paths.read], ['write', paths.write], ['dir', paths.dirs]] as const) {
+    for (const value of (flags[flag] as string[] | undefined) ?? []) {
+      const path = canonical(value);
+      if (!path) {
+        await cmd.writeError(`ems-files-grant: --${flag}: not an absolute path: ${value}\n`);
+        return 1;
+      }
+      list.push(path);
+    }
+  }
+  if (paths.read.length + paths.write.length + paths.dirs.length === 0) {
+    await cmd.writeError('ems-files-grant: nothing to grant: give --read, --write or --dir\n');
+    return 1;
+  }
+  setTimeout(grant(paths), seconds * 1000);
+  await cmd.writeLn(headerValue(endpoint));
+  return 0;
+};
+
+emsFilesGrant.spec = {
+  name: 'ems-files-grant',
+  admin: true,
+  effect: 'write' as const,
+  json: false,
+  description: "Grant paths through ems-files for a while and print the EMS-Files header that reaches them, to try a media service's way to EiN's files by hand",
+  args: [],
+  flags: [
+    { name: 'read', type: 'string' as const, description: 'A file to read, as a physical path; may be given more than once' },
+    { name: 'write', type: 'string' as const, description: 'A file to write; may be given more than once' },
+    { name: 'dir', type: 'string' as const, description: 'A directory to write files into; may be given more than once' },
+    { name: 'seconds', type: 'string' as const, description: `How long the grant lasts (default ${DEFAULT_SECONDS})` },
+  ],
+  examples: ['ems-files-grant --read /files/ab/01EXAMPLE --seconds 120'],
+  returns: 'the EMS-Files header value: address, user, secret and host key.',
+};
+
+export default emsFilesGrant;

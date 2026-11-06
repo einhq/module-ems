@@ -12,6 +12,7 @@
     "@ein/ui/theme": "../../src/builtin/ui/src/client/theme/mod.ts",
     "@ems/api": "./lib/api.ts",
     "@ems/client": "./lib/client.ts",
+    "@ems/files": "./lib/files.ts",
     "@ems/files-server": "./lib/files-server.ts",
     "@ems/gpu": "./lib/gpu.ts",
     "@ems/status": "./lib/status.ts",

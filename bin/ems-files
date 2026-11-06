@@ -1,0 +1,58 @@
+#!ts
+/**
+ * ems-files — serve the files of the media service's requests in flight over SFTP, for an EMS that
+ * does not mount EiN's file tiers.
+ *
+ * Runs as the `ems-files` service. While `CFG_EMS_FILES_ADDRESS` is set, it listens on
+ * `CFG_EMS_FILES_PORT`, and every request to the system's own EMS names it in its `EMS-Files`
+ * header: EMS reads the request's inputs and writes back its outputs here, and nothing else, for
+ * as long as the request runs. Empty, it serves nothing and EMS opens the paths it is sent on its
+ * own mounts.
+ */
+
+import type { CmdReturn, Command } from '@ein/client';
+import { emsUrl } from '@ems/client';
+import { FilesServer } from '@ems/files-server';
+
+const DEFAULT_PORT = 2224;
+
+const emsFiles = async (cmd: Command): CmdReturn => {
+  const stopped = new Promise<void>((resolve) => cmd.onInterrupt(resolve));
+  const address = (cmd.env.CFG_EMS_FILES_ADDRESS ?? '').trim();
+  if (!address) {
+    await cmd.writeLn('ems-files: off, EMS opens the paths it is sent on its own mounts (CFG_EMS_FILES_ADDRESS is empty)');
+    await stopped;
+    return 0;
+  }
+  const port = Number.parseInt(cmd.env.CFG_EMS_FILES_PORT || `${DEFAULT_PORT}`, 10);
+  if (!Number.isInteger(port) || port < 0 || port > 65535) {
+    await cmd.writeError(`ems-files: CFG_EMS_FILES_PORT: not a port: ${cmd.env.CFG_EMS_FILES_PORT}\n`);
+    return 1;
+  }
+  const url = emsUrl(cmd);
+  const server = new FilesServer({ port, address, emsUrl: url, log: (line) => void cmd.writeLn(line).catch(() => {}) });
+  try {
+    const listening = await server.start();
+    await cmd.writeLn(`ems-files: serving the files of requests to ${url} on port ${listening}, as ${address}`);
+    await stopped;
+  } catch (error) {
+    await cmd.writeError(`ems-files: ${error instanceof Error ? error.message : error}\n`);
+    return 1;
+  } finally {
+    await server.stop();
+  }
+  return 0;
+};
+
+emsFiles.spec = {
+  name: 'ems-files',
+  admin: true,
+  daemon: true,
+  effect: 'write' as const,
+  json: false,
+  description: "Serve the files of the media service's requests in flight over SFTP, for an EMS that does not mount EiN's files (the ems-files service)",
+  args: [],
+  flags: [],
+};
+
+export default emsFiles;

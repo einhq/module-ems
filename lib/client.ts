@@ -17,6 +17,7 @@
 import type { Command } from '@ein/client';
 import type { EmsDegradation } from '@ems/api';
 import { serviceKey, STEP_EXIT_INPUT, STEP_EXIT_TEMPORARY, withHostPath, withHostPaths } from '@ein/client';
+import { forRequest } from './files.ts';
 
 const DEFAULT_URL = 'http://127.0.0.1:8181';
 const API_MAJOR = 'v0';
@@ -256,7 +257,8 @@ type CallOptions = {
   stream?: boolean;
 };
 
-const baseUrl = (cmd: Command): string => (cmd.env.CFG_EMS_URL || DEFAULT_URL).replace(/\/+$/, '');
+/** The media service `cmd` talks to, without a trailing slash. */
+export const emsUrl = (cmd: Command): string => (cmd.env.CFG_EMS_URL || DEFAULT_URL).replace(/\/+$/, '');
 
 /** A request's headers, with EMS's key when the request goes to the system's own EMS (`serviceKey`). */
 const headers = async (cmd: Command): Promise<Record<string, string>> => {
@@ -391,26 +393,33 @@ const request = async (cmd: Command, op: string, body: Record<string, unknown>, 
   if (waitMs !== undefined) options.deadline = (Date.now() + waitMs) / 1000;
   const payload = Object.keys(options).length > 0 ? { ...body, options } : body;
   const stream = opts.stream || opts.onProgress !== undefined;
+  // An EMS without EiN's mounts reaches the request's files through ems-files, for as long as the
+  // answer takes: it sends back what it wrote before it answers.
+  const files = forRequest(emsUrl(cmd), payload);
 
-  const response = await fetchInterruptible(
-    cmd,
-    op,
-    `${baseUrl(cmd)}/${API_MAJOR}/${op.replace('.', '/')}`,
-    {
-      method: 'POST',
-      headers: { ...await headers(cmd), ...(stream ? { accept: 'text/event-stream' } : {}) },
-      body: JSON.stringify(payload),
-    },
-    waitMs,
-    opts.priority !== 'interactive',
-  );
-
+  let response: Response;
   let envelope: Envelope;
   try {
-    envelope = stream ? await streamedEnvelope(cmd, response, opts.onProgress) : await response.json() as Envelope;
-  } catch (error) {
-    if (error instanceof EmsUnavailableError) throw error;
-    throw new EmsUnavailableError(`ems: ${op} answered ${response.status} with no usable body`);
+    response = await fetchInterruptible(
+      cmd,
+      op,
+      `${emsUrl(cmd)}/${API_MAJOR}/${op.replace('.', '/')}`,
+      {
+        method: 'POST',
+        headers: { ...await headers(cmd), ...files.headers, ...(stream ? { accept: 'text/event-stream' } : {}) },
+        body: JSON.stringify(payload),
+      },
+      waitMs,
+      opts.priority !== 'interactive',
+    );
+    try {
+      envelope = stream ? await streamedEnvelope(cmd, response, opts.onProgress) : await response.json() as Envelope;
+    } catch (error) {
+      if (error instanceof EmsUnavailableError) throw error;
+      throw new EmsUnavailableError(`ems: ${op} answered ${response.status} with no usable body`);
+    }
+  } finally {
+    files.release();
   }
   if (!envelope.ok) {
     const code = envelope.error?.code ?? `http_${response.status}`;
@@ -1102,7 +1111,7 @@ export const extractText = async (cmd: Command, path: string, mimetype: string):
 
 const get = async (cmd: Command, path: string, waitSeconds = 5): Promise<unknown | null> => {
   try {
-    const response = await fetchInterruptible(cmd, path, `${baseUrl(cmd)}/${API_MAJOR}/${path}`, { headers: await headers(cmd) }, waitSeconds * 1000, false);
+    const response = await fetchInterruptible(cmd, path, `${emsUrl(cmd)}/${API_MAJOR}/${path}`, { headers: await headers(cmd) }, waitSeconds * 1000, false);
     if (!response.ok) return null;
     return await response.json();
   } catch {

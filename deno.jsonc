@@ -28,6 +28,6 @@
     "react": "npm:react@^19.2.3",
     "react-dom": "npm:react-dom@^19.2.3",
     "react-router-dom": "npm:react-router-dom@^7.12.0",
-    "ssh2": "jsr:@ein/ssh2-ts@^1.1.6"
+    "ssh2": "jsr:@ein/ssh2-ts@^1.1.7"
   }
 }

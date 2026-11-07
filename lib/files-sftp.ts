@@ -6,8 +6,10 @@
  * disk, opened as it is and following its links, or a node of the VFS with no file on disk. An
  * input opens read-only. An output opens write-only and is written in place, truncated first: a
  * client that writes through a mount (sshfs) has its writes there when its close returns, while
- * the SFTP close may come later, so nothing waits for that close. Nothing is removed, renamed,
- * linked or changed in its attributes: each of those is refused.
+ * the SFTP close may come later, so nothing waits for that close. An output whose file does not
+ * exist yet stats as an empty file, since sshfs sends its OPEN and a STAT together and gives up on
+ * the open when the STAT fails. Nothing is removed, renamed, linked or changed in its attributes:
+ * each of those is refused.
  *
  * A name is looked up when it is opened or stat'ed; a handle already open stays usable after its
  * request ends, until the client closes it or the session ends.
@@ -302,7 +304,10 @@ export class FilesSession {
     try {
       if (named === 'directory') return this.out.attrs(reqId, attrs(true, 0, Date.now()));
       if (named.disk) {
-        const info = await Deno.stat(named.disk);
+        const info = await Deno.stat(named.disk).catch((error) => {
+          if (named.mode === 'write' && error instanceof Deno.errors.NotFound) return { size: 0, mtime: new Date() };
+          throw error;
+        });
         return this.out.attrs(reqId, attrs(false, info.size, info.mtime?.getTime() ?? 0));
       }
       const info = await this.nodes.stat(named.node!);

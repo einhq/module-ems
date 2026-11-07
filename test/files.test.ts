@@ -190,6 +190,24 @@ Deno.test({
         await sftp.close(handle);
       });
 
+      await t.step('an output whose file does not exist yet opens the way sshfs opens it', async () => {
+        // sshfs looks the name up, then sends OPEN with CREAT|TRUNC and an LSTAT together, and
+        // gives up on the open when the LSTAT fails.
+        const { names, release } = await grant(vfsOf({}), [{ path: `${root}/new.bin`, mode: 'write' }]);
+        try {
+          const [fresh] = names;
+          assertEquals((await sftp.lstat(fresh)).size, 0);
+          const [handle, info] = await Promise.all([sftp.open(fresh, 'w'), sftp.lstat(fresh)]);
+          assertEquals(info.size, 0);
+          await sftp.write(handle, new TextEncoder().encode('created'), 0, 7, 0);
+          assertEquals((await sftp.fstat(handle)).size, 7);
+          await sftp.close(handle);
+          assertEquals(await Deno.readTextFile(`${root}/new.bin`), 'created');
+        } finally {
+          release();
+        }
+      });
+
       await t.step('the names end with their request', async () => {
         request.release();
         await assertRejects(() => sftp.readFile(input));

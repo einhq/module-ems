@@ -2,7 +2,7 @@ import { assertEquals } from '@std/assert';
 import type { HealthResult } from '@ems/client';
 import { modelsSample, workWaiting } from '@ems/models';
 import { statusFromHealth } from '@ems/status';
-import { holdingsOf } from '../ui/components/holdings.ts';
+import { holdingsOf, shelfOf } from '../ui/components/holdings.ts';
 
 /** EMS while the card is quiet: the search models on the card, and in RAM in the query worker; faces in use on the card. */
 const quiet: HealthResult = {
@@ -55,4 +55,25 @@ Deno.test("a search model's RAM copy beside its card copy is standby; an indexin
   assertEquals([ram.place, ram.mb, ram.search, ram.standby], ['ram', 1700, true, true]);
   assertEquals([card.place, card.mb, card.standby], ['card', 2800, false]);
   assertEquals([faces.working, faces.search, faces.standby], [true, false, false]);
+});
+
+Deno.test('a model with a copy loading is on the loading shelf, though another copy of it is working', () => {
+  const switching = statusFromHealth({
+    ...quiet,
+    families: {
+      'text-query': {
+        pinned: true,
+        running: true,
+        copies: [
+          { key: 'text-query:cpu', state: 'loaded', device: 'cpu', worker: 'query', ram_mb: 1200 },
+          { key: 'text-query:cuda', state: 'loading', device: 'cuda', worker: 'card' },
+        ],
+      },
+    },
+    requests: [],
+  }, 'http://ems');
+  const copies = holdingsOf(switching);
+  assertEquals(shelfOf(copies), 'loading');
+  assertEquals(shelfOf(copies.filter((copy) => copy.state === 'loaded')), 'working');
+  assertEquals(shelfOf([]), 'unloaded');
 });

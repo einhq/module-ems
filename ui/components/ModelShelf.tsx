@@ -1,11 +1,9 @@
 import { Box, Card, Group, SimpleGrid, Stack, Text, Title, Tooltip } from '@mantine/core';
 import { TablerIcon, WORKLOAD_COLORS } from '@ein/ui/components';
 import type { EmsFamily, EmsStatus } from '@ems/api';
-import { type Holding, holdingsOf, size } from './holdings.ts';
+import { type Holding, holdingsOf, type Shelf, shelfOf, size } from './holdings.ts';
 
 type Running = Extract<EmsStatus, { running: true }>;
-
-type Shelf = 'working' | 'loaded' | 'loading' | 'unloaded';
 
 const SHELVES: { shelf: Shelf; title: string; empty: string }[] = [
   { shelf: 'working', title: 'Working', empty: 'Nothing is being worked on' },
@@ -13,13 +11,6 @@ const SHELVES: { shelf: Shelf; title: string; empty: string }[] = [
   { shelf: 'loading', title: 'Loading or unloading', empty: 'None' },
   { shelf: 'unloaded', title: 'Not loaded', empty: 'None' },
 ];
-
-const shelfOf = (copies: Holding[]): Shelf => {
-  if (copies.length === 0) return 'unloaded';
-  if (copies.some((copy) => copy.working)) return 'working';
-  if (copies.some((copy) => copy.state !== 'loaded')) return 'loading';
-  return 'loaded';
-};
 
 /** Where a family's copies are: `GPU 2.8 GB + RAM 1.7 GB standby`. */
 const where = (copies: Holding[]): string =>
@@ -60,7 +51,7 @@ export function ModelShelf({ status }: { status: Running }) {
                 return (
                   <Tooltip key={family} label={purpose.get(family)?.purpose ?? family} withArrow multiline maw={320} disabled={!purpose.get(family)?.purpose}>
                     <Group gap={6} wrap='nowrap' px={8} py={4} style={{ borderRadius: 6, background: 'var(--mrx-surface-raised)' }}>
-                      {shelf === 'working' && <Box w={7} h={7} style={{ borderRadius: '50%', background: WORKLOAD_COLORS.running, flexShrink: 0 }} />}
+                      {copies.some((copy) => copy.working) && <Box w={7} h={7} style={{ borderRadius: '50%', background: WORKLOAD_COLORS.running, flexShrink: 0 }} />}
                       <Text size='sm' ff='monospace' style={{ flex: 1 }} truncate>{family}</Text>
                       {copies.length > 0 && <Text size='xs' c='dimmed' style={{ whiteSpace: 'nowrap' }}>{where(copies)}</Text>}
                     </Group>

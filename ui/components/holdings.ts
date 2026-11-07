@@ -58,3 +58,18 @@ export const holdingsOf = (status: Running): Holding[] => {
 
 /** `1.9 GB`, `840 MB`, or `—` when not measured. */
 export const size = (mb?: number): string => mb === undefined ? '—' : mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
+
+/** What a model is doing, as the Models shelf files it. */
+export type Shelf = 'working' | 'loaded' | 'loading' | 'unloaded';
+
+/**
+ * A copy on its way in or out puts the model under loading, before working: a search model whose RAM
+ * copy answers while its card copy loads is in the middle of a switch, which is what that shelf is
+ * for. It keeps its working dot there.
+ */
+export const shelfOf = (copies: Holding[]): Shelf => {
+  if (copies.length === 0) return 'unloaded';
+  if (copies.some((copy) => copy.state !== 'loaded')) return 'loading';
+  if (copies.some((copy) => copy.working)) return 'working';
+  return 'loaded';
+};

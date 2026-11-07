@@ -145,6 +145,7 @@ export type EmsStatus =
     queryWorker?: EmsWorkerMemory;
     queues?: Record<string, EmsLane>;
     callers?: Record<string, EmsCaller>;
+    memory?: EmsMemoryReading;
     warnings?: string[];
   };
 
@@ -175,6 +176,26 @@ export type GpuPoint = { at: number; value: number };
 export type EmsGpu = (GpuSample & { vramPercent?: number; utilSeries: GpuPoint[]; vramSeries: GpuPoint[] }) | null;
 
 /**
+ * The memory of the machine the media service runs on, which need not be EiN's: its total and what
+ * is available, and what EMS's own container holds of it (`usedMb`) and may (`limitMb`). MB.
+ */
+export type EmsMemoryReading = { totalMb: number; availableMb?: number; usedMb?: number; limitMb?: number };
+
+/**
+ * `ems-memory`: the media service's machine's memory now and over the last six hours, for the
+ * Overview's EMS RAM tile: in use (total less available) against the total, and EMS's own part.
+ * Null when there is no reading.
+ */
+export type EmsMemory = {
+  usedMb: number;
+  totalMb: number;
+  percent: number;
+  emsMb?: number;
+  emsLimitMb?: number;
+  series: GpuPoint[];
+} | null;
+
+/**
  * What the media service held at one moment, as `ems-models-sample` answers and the `ems-models`
  * series stores it, a minute apart: the card mode, each model copy and where it was, the families a
  * request was using, and EiN's own work beside it from core's newest `pools` reading — not made
@@ -184,6 +205,8 @@ export type EmsModelsSample = {
   mode: EmsCardMode;
   copies: { family: string; place: 'card' | 'ram'; worker?: string; state: EmsCopyState }[];
   working: string[];
+  /** Its machine's memory then. */
+  memory?: EmsMemoryReading;
   /** What other containers held of the card, in a standard install the chat model; absent when EMS cannot tell. */
   othersMb?: number;
   notStarted?: number;

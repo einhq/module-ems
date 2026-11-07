@@ -1,0 +1,63 @@
+#!ts
+/**
+ * ems-memory — the memory of the machine the media service runs on, now and over the last six
+ * hours, for the Overview's EMS RAM tile: in use (total less available) against the total, and what
+ * EMS's own container holds of it. That machine need not be EiN's.
+ *
+ * Read back from the `ems-models` series, whose minute samples carry it (`ems-models-sample`), so
+ * the tile costs no request to EMS. Null when there is no reading: no media service, or one older
+ * than API 0.3.2, which does not say.
+ */
+
+import type { CmdReturn, Command } from '@ein/client';
+import { readTail, seriesPath } from '@ein/client';
+import type { EmsMemory, EmsModelsSample } from '@ems/api';
+
+/** Six hours, a sample a minute, with room for a stretch written denser. */
+const WINDOW_MS = 6 * 60 * 60 * 1000;
+const READ_LIMIT = 6 * 60 * 2;
+/** Points per sparkline: more than a tile is wide is only bytes. */
+const POINTS = 120;
+
+/** The machine's memory in use: its total less what is available. */
+const used = (memory: NonNullable<EmsModelsSample['memory']>): number | undefined => memory.availableMb === undefined ? undefined : memory.totalMb - memory.availableMb;
+
+const emsMemory = async (cmd: Command): CmdReturn => {
+  const since = Date.now() - WINDOW_MS;
+  const samples = (await readTail<EmsModelsSample>(cmd.sys.vfs, cmd.access, seriesPath('ems-models'), READ_LIMIT))
+    .filter((sample) => sample.at >= since && sample.value.memory && used(sample.value.memory) !== undefined);
+  const now = samples[samples.length - 1]?.value.memory;
+  const step = Math.max(1, samples.length / POINTS);
+  const thinned = samples.length <= POINTS ? samples : Array.from({ length: POINTS }, (_, i) => samples[Math.min(samples.length - 1, Math.round((i + 1) * step) - 1)]);
+
+  const answer: EmsMemory = now
+    ? {
+      usedMb: used(now)!,
+      totalMb: now.totalMb,
+      percent: (used(now)! / now.totalMb) * 100,
+      ...(now.usedMb !== undefined ? { emsMb: now.usedMb } : {}),
+      ...(now.limitMb !== undefined ? { emsLimitMb: now.limitMb } : {}),
+      series: thinned.map(({ at, value }) => ({ at, value: (used(value.memory!)! / value.memory!.totalMb) * 100 })),
+    }
+    : null;
+
+  if (cmd.json) {
+    await cmd.writeJSON(answer satisfies EmsMemory);
+    return 0;
+  }
+  if (!answer) await cmd.writeLn("no reading of the media service machine's memory in the last six hours");
+  else await cmd.writeLn(`ram ${Math.round(answer.percent)}%  ${answer.usedMb}/${answer.totalMb} MB${answer.emsMb !== undefined ? `  ems ${answer.emsMb} MB` : ''}`);
+  return 0;
+};
+
+emsMemory.spec = {
+  name: 'ems-memory',
+  effect: 'read' as const,
+  description: "The memory of the media service's machine now, with the last six hours, and what EMS holds of it",
+  args: [],
+  flags: [],
+  examples: ['ems-memory'],
+  returns: 'usedMb, totalMb, percent, emsMb, emsLimitMb and the series of percent, or null when there is no reading.',
+};
+
+export default emsMemory;

@@ -99,6 +99,16 @@ export const statusFromHealth = (result: HealthResult, url: string): Extract<Ems
     ...(result.process?.recycles ? { recycles: result.process.recycles } : {}),
     ...(result.process?.query ? { queryWorker: memoryOf(result.process.query) } : {}),
     ...(result.queues ? { queues: result.queues } : {}),
+    ...(result.memory
+      ? {
+        memory: {
+          totalMb: result.memory.total_mb,
+          ...(result.memory.available_mb !== undefined ? { availableMb: result.memory.available_mb } : {}),
+          ...(result.memory.used_mb !== undefined ? { usedMb: result.memory.used_mb } : {}),
+          ...(result.memory.limit_mb !== undefined ? { limitMb: result.memory.limit_mb } : {}),
+        },
+      }
+      : {}),
     ...(result.callers
       ? {
         callers: Object.fromEntries(

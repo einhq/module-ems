@@ -200,6 +200,8 @@ export type HealthResult = {
   requests: { op: string; caller?: string; lane: string; interactive: boolean; queued: number; started?: number; family?: string }[];
   /** Each caller, by the name its key has: its weight, the slot-seconds it has used, and its requests running and waiting now. */
   callers?: Record<string, { weight: number; used_seconds: number; running: number; waiting: number }>;
+  /** The machine EMS runs on (API 0.3.2): its total and available memory, and what EMS's container holds of it and may. */
+  memory?: { total_mb: number; available_mb?: number; used_mb?: number; limit_mb?: number };
   /**
    * Who has the card (*3.4*): `busy` while batch model work arrives, `quiet` after `quiet_after`
    * seconds without any, when a card worker holds the search models that fit; `off` with no card.

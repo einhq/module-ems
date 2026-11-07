@@ -41,6 +41,7 @@ export const modelsSample = (status: Running, waiting?: { notStarted: number; in
     ),
     working: [...working].sort(),
     ...(others !== undefined ? { othersMb: others } : {}),
+    ...(status.memory ? { memory: status.memory } : {}),
     ...(waiting ?? {}),
   };
 };

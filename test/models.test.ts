@@ -13,6 +13,7 @@ const quiet: HealthResult = {
   models: {},
   worker: { running: true, restarts: 0 },
   card: { mode: 'quiet' },
+  memory: { total_mb: 31890, available_mb: 14210, used_mb: 9120, limit_mb: 24576 },
   families: {
     'siglip-text': {
       pinned: true,
@@ -37,6 +38,7 @@ Deno.test('a sample says the card mode, each copy and where it is, and the model
   ]);
   assertEquals(sample.working, ['faces']);
   assertEquals(sample.othersMb, 5200, 'what the card holds beyond EMS: the chat model');
+  assertEquals(sample.memory, { totalMb: 31890, availableMb: 14210, usedMb: 9120, limitMb: 24576 }, "its machine's memory");
   assertEquals([sample.notStarted, sample.inLine], [12, 30]);
 });
 

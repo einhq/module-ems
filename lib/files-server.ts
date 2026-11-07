@@ -8,7 +8,7 @@
  */
 
 import { type Connection, generateKeyPair, Server, type ServerAuthContext, SFTP } from 'ssh2';
-import { FilesSession } from './files-sftp.ts';
+import { FilesSession, type NodeAccess } from './files-sftp.ts';
 import { type FilesEndpoint, filesState } from './files.ts';
 
 export const FILES_USER = 'ems';
@@ -21,8 +21,10 @@ export type FilesServerOptions = {
   port: number;
   /** `host:port` as EMS reaches this server; a port of its own when the listener is behind a mapping. */
   address: string;
-  /** The media service the grants are for. */
+  /** The media service the names are for. */
   emsUrl: string;
+  /** The VFS, for the names of nodes with no file on disk. */
+  nodes: NodeAccess;
   log?: (line: string) => void;
 };
 
@@ -57,13 +59,13 @@ export class FilesServer {
     await this.server.listen(this.options.port, '0.0.0.0');
     const port = this.server.address()?.port ?? this.options.port;
     this.endpoint = { address: this.options.address, emsUrl: this.options.emsUrl, user: FILES_USER, secret, hostKey: keys.public };
-    filesState().endpoint = this.endpoint;
+    filesState().endpoints.set(this.options.emsUrl, this.endpoint);
     return port;
   }
 
   async stop(): Promise<void> {
-    const state = filesState();
-    if (state.endpoint === this.endpoint) state.endpoint = undefined;
+    const { endpoints } = filesState();
+    if (endpoints.get(this.options.emsUrl) === this.endpoint) endpoints.delete(this.options.emsUrl);
     this.server?.close();
     this.server = undefined;
     await Promise.all([...this.sessions].map((session) => session.closeAll()));
@@ -83,7 +85,7 @@ export class FilesServer {
           const channel = acceptSftp();
           if (!channel) return;
           const sftp = new SFTP({ protocol: client.protocol }, { type: 'session', incoming: channel.incoming, outgoing: channel.outgoing }, { server: true });
-          const files = new FilesSession(log);
+          const files = new FilesSession(this.options.nodes, log);
           this.sessions.add(files);
           files.attach(sftp);
           void pipe(channel.readable, (data) => sftp.push(data), () => {

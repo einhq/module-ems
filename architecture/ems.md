@@ -56,7 +56,7 @@ stay on the archive's storage and are referenced by symlink.
 the pipeline engine down with it, the image carries no model weights, and one service shares the
 GPU between the models and ffmpeg. EMS is a stateless HTTP service — `POST /v0/<namespace>/<op>`, JSON in
 and out, `text/event-stream` progress for long operations, a closed connection is a cancel — that
-answers questions about bytes on the shared mounts and produces bytes there: probing, fingerprints,
+answers questions about a request's files and produces files for it: probing, fingerprints,
 faces, speech, embeddings, document text, renditions and transcodes. Its contract is `docs/api.md` in that repository. It knows nothing about the
 VFS, holds no state, and never calls EiN; every convention it needs (the display angle, target
 sizes, the face boxes, the speakers' turns) arrives as a request parameter.
@@ -64,9 +64,16 @@ sizes, the face boxes, the speakers' turns) arrives as a request parameter.
 The `ems` module here is the client side. [@ems/client](../lib/client.ts) is one
 function per op — `transcribe`, `embedTexts`, `embedImage`, `embedImageText`, `detectFaces`,
 `voiceprint`, `activeSpeakers`, `fingerprint`, `extractText`, `probe`, the renditions and the
-transcodes, plus `health` and what `capabilities` says each result is stamped with now (`generations`) — and resolves
-every VFS path to its physical one through `withHostPath` before sending it, staging a db-tier node
-into `/files-tmp`. Three outcomes stay distinct for everything downstream:
+transcodes, plus `health` and what `capabilities` says each result is stamped with now (`generations`) — and sends
+every file by a name of its own: EMS mounts no file tier, and reaches a request's files through the
+`ems-files` service, an SFTP endpoint that offers only chacha20-poly1305, lists nothing, and serves
+each request a directory of its own, `/<grant>/<n>-<VFS name>`, for as long as it runs
+([files.ts](../lib/files.ts)). The request's `EMS-Files` header names the endpoint, its one user,
+the secret made when the service started and its host key; EMS mounts it with sshfs, reads the
+inputs there, and copies what it wrote back before it answers. A name stands for the node's file
+on disk, or for the node itself when it has none (the db tier), read and written through the VFS.
+`CFG_EMS_FILES_ADDRESS` is the endpoint as EMS reaches it; while it is empty or the service is
+not serving, a request that names a file is `EmsUnavailableError` and waits. Three outcomes stay distinct for everything downstream:
 `EmsUnavailableError` (unreachable, timed out, interrupted, `busy`, or a model worker still loading —
 the step exits `STEP_EXIT_TEMPORARY` through `stepExitCode` and waits without spending an attempt),
 `EmsError` carrying the API's `code` and `permanent`
@@ -81,8 +88,9 @@ SSE response form and still receive the same terminal envelope. EMS generates no
 conversation belongs to the assistant's own model service (`modules/assistant/lib/llm.ts`,
 `CFG_LLM_URL`), which may be a provider elsewhere, so no processing step depends on it.
 
-Configuration is two options: `CFG_EMS_URL` and `CFG_EMS_KEY`, a secret the client sends only to
-the system's own `CFG_EMS_URL` (`serviceKey`). A batch request has no ceiling: it
+Configuration is `CFG_EMS_URL`, `CFG_EMS_KEY`, a secret the client sends only to the system's
+own `CFG_EMS_URL` (`serviceKey`), and `CFG_EMS_FILES_ADDRESS` and `CFG_EMS_FILES_PORT`, where
+`ems-files` is reached and where it listens. A batch request has no ceiling: it
 waits for EMS's answer however long a cold model load and the work queued ahead of it take, and
 only a caller a person is waiting on names a timeout of its own. The thirteen model settings the `inference` module used to declare — which model, quantization,
 pinning, idle eviction, the RSS ceiling, the whisper decode options — are EMS's environment now and

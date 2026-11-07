@@ -2,10 +2,11 @@
  * Client for EMS (API v0) — the media service that holds every model and media tool EiN uses.
  *
  * HTTP/1.1 + JSON on `CFG_EMS_URL`, with the bearer key `CFG_EMS_KEY` when that is the system's own
- * EMS — the key is in no shell's environment and goes nowhere else. Every op takes the
- * *physical* path of a file: `withHostPath` resolves a VFS path to the one EMS can open, and
- * stages a db-tier node into the shared scratch first — EMS mounts the same `/files`, `/old`,
- * `/files-volatile` and `/files-tmp` at the same paths, so nothing is ever copied.
+ * EMS — the key is in no shell's environment and goes nowhere else. Every op takes the VFS path
+ * of a file, which the request names by a name of its own in a directory `ems-files` serves EMS
+ * for as long as the request runs (files.ts): EMS has no files of its own and reaches the request's
+ * through that endpoint. With `CFG_EMS_FILES_ADDRESS` empty, or the service not serving yet, no
+ * request that names a file goes: EMS counts as unavailable.
  *
  * Three outcomes matter to everything downstream, and they are kept distinct: EMS unreachable
  * (`EmsUnavailableError` — the step fails for its normal retry path), EMS answered with a
@@ -16,7 +17,7 @@
 
 import type { Command } from '@ein/client';
 import type { EmsDegradation } from '@ems/api';
-import { serviceKey, STEP_EXIT_INPUT, STEP_EXIT_TEMPORARY, withHostPath, withHostPaths } from '@ein/client';
+import { serviceKey, STEP_EXIT_INPUT, STEP_EXIT_TEMPORARY } from '@ein/client';
 import { forRequest } from './files.ts';
 
 const DEFAULT_URL = 'http://127.0.0.1:8181';
@@ -393,9 +394,14 @@ const request = async (cmd: Command, op: string, body: Record<string, unknown>, 
   if (waitMs !== undefined) options.deadline = (Date.now() + waitMs) / 1000;
   const payload = Object.keys(options).length > 0 ? { ...body, options } : body;
   const stream = opts.stream || opts.onProgress !== undefined;
-  // An EMS without EiN's mounts reaches the request's files through ems-files, for as long as the
-  // answer takes: it sends back what it wrote before it answers.
-  const files = await forRequest(emsUrl(cmd), payload);
+  // EMS reaches the request's files through ems-files for as long as the answer takes, and sends
+  // back what it wrote before it answers; while the service does not serve (it restarts, or
+  // CFG_EMS_FILES_ADDRESS is empty), EMS could open none of them, so the request waits.
+  const files = await forRequest(cmd, emsUrl(cmd), payload);
+  if (!files) {
+    const why = cmd.env.CFG_EMS_FILES_ADDRESS ? 'ems-files is not serving' : 'CFG_EMS_FILES_ADDRESS is empty';
+    throw new EmsUnavailableError(`ems: ${op}: ${why}`);
+  }
 
   let response: Response;
   let envelope: Envelope;
@@ -447,38 +453,37 @@ const fileRef = (path: string, angle = 0, mirror = false): Record<string, unknow
  * `CFG_WHISPER_WORD_TIMESTAMPS` are forwarded when set; EMS's own configuration decides
  * otherwise.
  */
-export const transcribe = async (cmd: Command, path: string): Promise<TranscribeResult> =>
-  await withHostPath(cmd, path, async (hostPath) => {
-    const body: Record<string, unknown> = { file: fileRef(hostPath) };
-    if (cmd.env.CFG_WHISPER_LANGUAGE) body.language = cmd.env.CFG_WHISPER_LANGUAGE;
-    const silence = Number(cmd.env.CFG_WHISPER_VAD_MIN_SILENCE_MS);
-    if (cmd.env.CFG_WHISPER_VAD_MIN_SILENCE_MS && Number.isFinite(silence)) body.vad = { min_silence_ms: silence };
-    if (cmd.env.CFG_WHISPER_WORD_TIMESTAMPS) body.word_timestamps = cmd.env.CFG_WHISPER_WORD_TIMESTAMPS === '1';
-    const raw = await request(cmd, 'speech.transcribe', body);
-    const result = raw.result as {
-      text: string;
-      audio?: boolean;
-      speech: boolean;
-      segments?: TranscriptSegment[];
-      language?: string;
-      language_probability?: number;
-      duration?: number;
-    };
-    const producer = producerOf(raw);
-    return {
-      text: result.text,
-      audio: result.audio !== false,
-      // The producer is the transcribe signature (`whisper-large-v3:vad=…`); its model half is
-      // what `describedBy` and the provenance strings want.
-      model: producer.split(':', 1)[0],
-      signature: producer,
-      speech: result.speech,
-      segments: result.segments ?? [],
-      ...(result.language ? { language: result.language } : {}),
-      ...(result.language_probability !== undefined ? { languageProbability: result.language_probability } : {}),
-      ...(result.duration !== undefined ? { duration: result.duration } : {}),
-    };
-  });
+export const transcribe = async (cmd: Command, path: string): Promise<TranscribeResult> => {
+  const body: Record<string, unknown> = { file: fileRef(path) };
+  if (cmd.env.CFG_WHISPER_LANGUAGE) body.language = cmd.env.CFG_WHISPER_LANGUAGE;
+  const silence = Number(cmd.env.CFG_WHISPER_VAD_MIN_SILENCE_MS);
+  if (cmd.env.CFG_WHISPER_VAD_MIN_SILENCE_MS && Number.isFinite(silence)) body.vad = { min_silence_ms: silence };
+  if (cmd.env.CFG_WHISPER_WORD_TIMESTAMPS) body.word_timestamps = cmd.env.CFG_WHISPER_WORD_TIMESTAMPS === '1';
+  const raw = await request(cmd, 'speech.transcribe', body);
+  const result = raw.result as {
+    text: string;
+    audio?: boolean;
+    speech: boolean;
+    segments?: TranscriptSegment[];
+    language?: string;
+    language_probability?: number;
+    duration?: number;
+  };
+  const producer = producerOf(raw);
+  return {
+    text: result.text,
+    audio: result.audio !== false,
+    // The producer is the transcribe signature (`whisper-large-v3:vad=…`); its model half is
+    // what `describedBy` and the provenance strings want.
+    model: producer.split(':', 1)[0],
+    signature: producer,
+    speech: result.speech,
+    segments: result.segments ?? [],
+    ...(result.language ? { language: result.language } : {}),
+    ...(result.language_probability !== undefined ? { languageProbability: result.language_probability } : {}),
+    ...(result.duration !== undefined ? { duration: result.duration } : {}),
+  };
+};
 
 /**
  * How long an interactive caller waits for a query embed. A warm embedder answers in well under
@@ -524,15 +529,14 @@ export const embedTexts = async (cmd: Command, texts: string[], opts: EmbedTexts
  * named by `angle`/`mirror` — the file node's rotation, never the EXIF tag's — and the models
  * that made them.
  */
-export const detectFaces = async (cmd: Command, path: string, angle = 0, mirror = false): Promise<DetectFacesResult> =>
-  await withHostPath(cmd, path, async (hostPath) => {
-    const raw = await request(cmd, 'faces.detect', { file: fileRef(hostPath, angle, mirror) });
-    const result = raw.result as {
-      frame: { width: number; height: number };
-      faces: { box: Box; confidence: number; embedding: number[]; landmarks?: number[][]; pose?: FacePose }[];
-    };
-    return { frame: result.frame, faces: result.faces.map((face, index) => ({ index, ...face })), producer: producerOf(raw) };
-  });
+export const detectFaces = async (cmd: Command, path: string, angle = 0, mirror = false): Promise<DetectFacesResult> => {
+  const raw = await request(cmd, 'faces.detect', { file: fileRef(path, angle, mirror) });
+  const result = raw.result as {
+    frame: { width: number; height: number };
+    faces: { box: Box; confidence: number; embedding: number[]; landmarks?: number[][]; pose?: FacePose }[];
+  };
+  return { frame: result.frame, faces: result.faces.map((face, index) => ({ index, ...face })), producer: producerOf(raw) };
+};
 
 /**
  * Who speaks when in a recording: its voices, each with its turns and one voiceprint, and every
@@ -543,25 +547,24 @@ export const detectFaces = async (cmd: Command, path: string, angle = 0, mirror 
  * file-wide speakers before answering — the window is its hardware's business, not ours.
  * `speech` is false when nobody talks. `model` names both models, `<diarizer>+<embedder>`.
  */
-export const voiceprint = async (cmd: Command, path: string, opts: Pick<CallOptions, 'onProgress'> = {}): Promise<VoiceprintResult> =>
-  await withHostPath(cmd, path, async (hostPath) => {
-    const raw = await request(cmd, 'speech.voiceprint', { file: fileRef(hostPath) }, opts);
-    const result = raw.result as {
-      speech: boolean;
-      audio?: boolean;
-      duration: number;
-      turns: { start: number; end: number; speaker: string | null }[];
-      speakers?: { id: string; turns: [number, number][]; talkSeconds: number; vector: number[] }[];
-    };
-    return {
-      turns: result.turns.map((t) => ({ start: t.start, end: t.end, speaker: t.speaker ?? null })),
-      speakers: (result.speakers ?? []).map((s) => ({ id: s.id, turns: s.turns, talkSeconds: s.talkSeconds, vector: s.vector })),
-      speech: result.speech,
-      audio: result.audio ?? result.speech,
-      duration: result.duration,
-      model: producerOf(raw),
-    };
-  });
+export const voiceprint = async (cmd: Command, path: string, opts: Pick<CallOptions, 'onProgress'> = {}): Promise<VoiceprintResult> => {
+  const raw = await request(cmd, 'speech.voiceprint', { file: fileRef(path) }, opts);
+  const result = raw.result as {
+    speech: boolean;
+    audio?: boolean;
+    duration: number;
+    turns: { start: number; end: number; speaker: string | null }[];
+    speakers?: { id: string; turns: [number, number][]; talkSeconds: number; vector: number[] }[];
+  };
+  return {
+    turns: result.turns.map((t) => ({ start: t.start, end: t.end, speaker: t.speaker ?? null })),
+    speakers: (result.speakers ?? []).map((s) => ({ id: s.id, turns: s.turns, talkSeconds: s.talkSeconds, vector: s.vector })),
+    speech: result.speech,
+    audio: result.audio ?? result.speech,
+    duration: result.duration,
+    model: producerOf(raw),
+  };
+};
 
 /**
  * Per speaker of a video, the visible face whose lips move with its voice, in one request: EMS
@@ -575,11 +578,10 @@ export const activeSpeakers = async (
   mirror: boolean,
   speakers: { id: string; turns: [number, number][] }[],
   opts: Pick<CallOptions, 'onProgress'> = {},
-): Promise<ActiveSpeaker[]> =>
-  await withHostPath(cmd, videoPath, async (hostVideo) => {
-    const raw = await request(cmd, 'speech.active_speakers', { file: fileRef(hostVideo, angle, mirror), speakers }, opts);
-    return (raw.result as { speakers: ActiveSpeaker[] }).speakers;
-  });
+): Promise<ActiveSpeaker[]> => {
+  const raw = await request(cmd, 'speech.active_speakers', { file: fileRef(videoPath, angle, mirror), speakers }, opts);
+  return (raw.result as { speakers: ActiveSpeaker[] }).speakers;
+};
 
 type DetectVideoFacesOptions = Pick<CallOptions, 'onProgress'> & {
   /** Seconds between the frames looked at; EMS's default is 1. */
@@ -601,15 +603,14 @@ export const detectVideoFaces = async (
   angle: number,
   mirror: boolean,
   opts: DetectVideoFacesOptions = {},
-): Promise<DetectVideoFacesResult> =>
-  await withHostPath(cmd, path, async (hostPath) => {
-    const body: Record<string, unknown> = { file: fileRef(hostPath, angle, mirror) };
-    if (opts.interval !== undefined) body.interval = opts.interval;
-    if (opts.minSize !== undefined) body.min_size = opts.minSize;
-    if (opts.minConfidence !== undefined) body.min_confidence = opts.minConfidence;
-    const raw = await request(cmd, 'faces.detect_video', body, { onProgress: opts.onProgress, stream: true });
-    return { ...(raw.result as Omit<DetectVideoFacesResult, 'producer'>), producer: producerOf(raw) };
-  });
+): Promise<DetectVideoFacesResult> => {
+  const body: Record<string, unknown> = { file: fileRef(path, angle, mirror) };
+  if (opts.interval !== undefined) body.interval = opts.interval;
+  if (opts.minSize !== undefined) body.min_size = opts.minSize;
+  if (opts.minConfidence !== undefined) body.min_confidence = opts.minConfidence;
+  const raw = await request(cmd, 'faces.detect_video', body, { onProgress: opts.onProgress, stream: true });
+  return { ...(raw.result as Omit<DetectVideoFacesResult, 'producer'>), producer: producerOf(raw) };
+};
 
 type EmbedImageOptions = EmbedTextOptions & {
   angle?: number;
@@ -631,22 +632,21 @@ export type EmbedImageResult = {
  * A picture's vector in the image-text space (SigLIP2), for search by what is in it. Normalized; compare by cosine against `embedImageText`, or against another
  * picture's. `interactive` for a search someone is waiting on, as with `embedImageText`.
  */
-export const embedImage = async (cmd: Command, path: string, opts: EmbedImageOptions = {}): Promise<EmbedImageResult> =>
-  await withHostPath(cmd, path, async (hostPath) => {
-    const raw = await request(
-      cmd,
-      'vision.embed',
-      { file: { path: hostPath, angle: opts.angle ?? 0, mirror: opts.mirror ?? false, ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) } },
-      opts.interactive ? { timeoutSeconds: opts.timeoutSeconds ?? INTERACTIVE_TIMEOUT_SECONDS, priority: 'interactive' } : {},
-    );
-    const result = raw.result as { embedding?: number[]; frames?: { at: number; embedding: number[] }[]; dimension: number };
-    return {
-      producer: producerOf(raw),
-      dimension: result.dimension,
-      ...(result.embedding ? { embedding: result.embedding } : {}),
-      ...(result.frames ? { frames: result.frames } : {}),
-    };
-  });
+export const embedImage = async (cmd: Command, path: string, opts: EmbedImageOptions = {}): Promise<EmbedImageResult> => {
+  const raw = await request(
+    cmd,
+    'vision.embed',
+    { file: { path: path, angle: opts.angle ?? 0, mirror: opts.mirror ?? false, ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) } },
+    opts.interactive ? { timeoutSeconds: opts.timeoutSeconds ?? INTERACTIVE_TIMEOUT_SECONDS, priority: 'interactive' } : {},
+  );
+  const result = raw.result as { embedding?: number[]; frames?: { at: number; embedding: number[] }[]; dimension: number };
+  return {
+    producer: producerOf(raw),
+    dimension: result.dimension,
+    ...(result.embedding ? { embedding: result.embedding } : {}),
+    ...(result.frames ? { frames: result.frames } : {}),
+  };
+};
 
 /** Search text as a vector in the pictures' space, and the model that made it. */
 export const embedImageText = async (cmd: Command, text: string, opts: EmbedTextOptions = {}): Promise<{ embedding: number[]; producer: string }> => {
@@ -708,15 +708,15 @@ export const MAX_RENDITION_TARGETS = 32;
  * Sized copies of one image, from one decode — the derivative ladder, and a face crop when a
  * target carries `crop`. Every output is written or none is. At most `MAX_RENDITION_TARGETS`.
  */
-export const renditions = async (cmd: Command, path: string, opts: RenditionsOptions): Promise<RenditionsResult> =>
-  await withHostPaths(cmd, [path, ...opts.targets.map((t) => t.output)], async ([hostPath, ...outputs]) => {
-    const body = {
-      file: { ...fileRef(hostPath, opts.angle ?? 0, opts.mirror ?? false), ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) },
-      targets: targetBodies(opts.targets, outputs),
-    };
-    const answer = await request(cmd, 'image.renditions', body);
-    return renditionsOf(answer.result as { frame: { width: number; height: number }; targets: Rendition[] }, opts.targets, answer);
-  });
+export const renditions = async (cmd: Command, path: string, opts: RenditionsOptions): Promise<RenditionsResult> => {
+  const outputs = opts.targets.map((t) => t.output);
+  const body = {
+    file: { ...fileRef(path, opts.angle ?? 0, opts.mirror ?? false), ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) },
+    targets: targetBodies(opts.targets, outputs),
+  };
+  const answer = await request(cmd, 'image.renditions', body);
+  return renditionsOf(answer.result as { frame: { width: number; height: number }; targets: Rendition[] }, opts.targets, answer);
+};
 
 type PosterOptions = RenditionsOptions & {
   /** Seconds into the clip; EMS defaults to 1, past the black leader most cameras record. */
@@ -727,34 +727,34 @@ type PosterOptions = RenditionsOptions & {
 };
 
 /** One frame of a video, fitted into rendition targets like a photo, and the second it was taken at. */
-export const poster = async (cmd: Command, path: string, opts: PosterOptions): Promise<RenditionsResult & { t: number }> =>
-  await withHostPaths(cmd, [path, ...opts.targets.map((t) => t.output)], async ([hostPath, ...outputs]) => {
-    const body: Record<string, unknown> = {
-      file: { ...fileRef(hostPath, opts.angle ?? 0, opts.mirror ?? false), ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) },
-      targets: targetBodies(opts.targets, outputs),
-    };
-    if (opts.at !== undefined) body.at = opts.at;
-    if (opts.deinterlace) body.deinterlace = true;
-    if (opts.skipBlank) body.skip_blank = true;
-    const answer = await request(cmd, 'video.poster', body);
-    const raw = answer.result as { frame: { width: number; height: number }; targets: Rendition[]; t: number };
-    return { ...renditionsOf(raw, opts.targets, answer), t: raw.t };
-  });
+export const poster = async (cmd: Command, path: string, opts: PosterOptions): Promise<RenditionsResult & { t: number }> => {
+  const outputs = opts.targets.map((t) => t.output);
+  const body: Record<string, unknown> = {
+    file: { ...fileRef(path, opts.angle ?? 0, opts.mirror ?? false), ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) },
+    targets: targetBodies(opts.targets, outputs),
+  };
+  if (opts.at !== undefined) body.at = opts.at;
+  if (opts.deinterlace) body.deinterlace = true;
+  if (opts.skipBlank) body.skip_blank = true;
+  const answer = await request(cmd, 'video.poster', body);
+  const raw = answer.result as { frame: { width: number; height: number }; targets: Rendition[]; t: number };
+  return { ...renditionsOf(raw, opts.targets, answer), t: raw.t };
+};
 
 type WaveformStyle = { foreground?: string; background?: string; baseline?: string | null; aspect?: number };
 type WaveformOptions = { mimetype?: string; targets: RenditionTarget[]; style?: WaveformStyle };
 
 /** A rendered waveform picture of a recording, per target: square for `cover`, a banner otherwise. */
-export const waveform = async (cmd: Command, path: string, opts: WaveformOptions): Promise<RenditionsResult> =>
-  await withHostPaths(cmd, [path, ...opts.targets.map((t) => t.output)], async ([hostPath, ...outputs]) => {
-    const body: Record<string, unknown> = {
-      file: { path: hostPath, ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) },
-      targets: targetBodies(opts.targets, outputs),
-    };
-    if (opts.style) body.style = opts.style;
-    const answer = await request(cmd, 'audio.waveform', body);
-    return renditionsOf(answer.result as { targets: Rendition[] }, opts.targets, answer);
-  });
+export const waveform = async (cmd: Command, path: string, opts: WaveformOptions): Promise<RenditionsResult> => {
+  const outputs = opts.targets.map((t) => t.output);
+  const body: Record<string, unknown> = {
+    file: { path: path, ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) },
+    targets: targetBodies(opts.targets, outputs),
+  };
+  if (opts.style) body.style = opts.style;
+  const answer = await request(cmd, 'audio.waveform', body);
+  return renditionsOf(answer.result as { targets: Rendition[] }, opts.targets, answer);
+};
 
 type VideoTranscodeOptions = {
   /** VFS path of the node whose bytes EMS writes (the caller creates it first and syncs it after). */
@@ -788,49 +788,48 @@ type VideoTranscodeResult = {
 };
 
 /**
- * The web rendition of a video, written by EMS into `output`'s physical file.
+ * The web rendition of a video, written by EMS into `output`.
  *
  * EMS runs the whole ladder (everything in VRAM, a CPU decode into NVENC, the CPU alone), the
  * projected CPU-decode budget and the windowed encode; a source it cannot make the rendition
  * of at its budget comes back as an `EmsError` with code `refused`, permanent — see
  * `generations`' `cpuBudget` for what to record beside it.
  */
-export const transcodeVideo = async (cmd: Command, path: string, opts: VideoTranscodeOptions): Promise<VideoTranscodeResult> =>
-  await withHostPaths(cmd, [path, opts.output], async ([hostPath, output]) => {
-    const body: Record<string, unknown> = {
-      file: { ...fileRef(hostPath, opts.angle ?? 0, opts.mirror ?? false), ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) },
-      output: { path: output, format: 'mp4' },
-      video: {
-        ...(opts.box ? { box: opts.box } : {}),
-        ...(opts.quality !== undefined ? { quality: opts.quality } : {}),
-        ...(opts.speed !== undefined ? { speed: opts.speed } : {}),
-        ...(opts.deinterlace ? { deinterlace: true } : {}),
-      },
-    };
-    if (opts.audioBitrate === null) body.audio = null;
-    else if (opts.audioBitrate) body.audio = { bitrate: opts.audioBitrate };
-    if (opts.clip) body.clip = opts.clip;
-    if (opts.sourceCodec) body.hints = { source_codec: opts.sourceCodec };
-    const answer = await request(cmd, 'video.transcode', body);
-    const raw = answer.result as {
-      width: number | null;
-      height: number | null;
-      duration: number | null;
-      bytes: number;
-      video_codec: string | null;
-      audio_codec: string | null;
-    };
-    return {
-      path: opts.output,
-      width: raw.width,
-      height: raw.height,
-      duration: raw.duration,
-      bytes: raw.bytes,
-      videoCodec: raw.video_codec,
-      audioCodec: raw.audio_codec,
-      producer: producerOf(answer),
-    };
-  });
+export const transcodeVideo = async (cmd: Command, path: string, opts: VideoTranscodeOptions): Promise<VideoTranscodeResult> => {
+  const body: Record<string, unknown> = {
+    file: { ...fileRef(path, opts.angle ?? 0, opts.mirror ?? false), ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) },
+    output: { path: opts.output, format: 'mp4' },
+    video: {
+      ...(opts.box ? { box: opts.box } : {}),
+      ...(opts.quality !== undefined ? { quality: opts.quality } : {}),
+      ...(opts.speed !== undefined ? { speed: opts.speed } : {}),
+      ...(opts.deinterlace ? { deinterlace: true } : {}),
+    },
+  };
+  if (opts.audioBitrate === null) body.audio = null;
+  else if (opts.audioBitrate) body.audio = { bitrate: opts.audioBitrate };
+  if (opts.clip) body.clip = opts.clip;
+  if (opts.sourceCodec) body.hints = { source_codec: opts.sourceCodec };
+  const answer = await request(cmd, 'video.transcode', body);
+  const raw = answer.result as {
+    width: number | null;
+    height: number | null;
+    duration: number | null;
+    bytes: number;
+    video_codec: string | null;
+    audio_codec: string | null;
+  };
+  return {
+    path: opts.output,
+    width: raw.width,
+    height: raw.height,
+    duration: raw.duration,
+    bytes: raw.bytes,
+    videoCodec: raw.video_codec,
+    audioCodec: raw.audio_codec,
+    producer: producerOf(answer),
+  };
+};
 
 type StoryboardOptions = {
   /** VFS path of the node whose bytes EMS writes (the caller creates it first and syncs it after). */
@@ -864,43 +863,42 @@ type StoryboardSheet = {
 };
 
 /**
- * A video's frames at an even interval, tiled into one AVIF sheet, written by EMS into `output`'s
- * physical file: what a player's timeline shows under the pointer. The video must be upright (a
+ * A video's frames at an even interval, tiled into one AVIF sheet, written by EMS into `output`:
+ * what a player's timeline shows under the pointer. The video must be upright (a
  * rendition); its sample aspect ratio is applied, so the tiles are its display shape.
  */
-export const videoStoryboard = async (cmd: Command, path: string, opts: StoryboardOptions): Promise<StoryboardSheet> =>
-  await withHostPaths(cmd, [path, opts.output], async ([hostPath, output]) => {
-    const body: Record<string, unknown> = {
-      file: { path: hostPath },
-      output: { path: output, format: 'avif', ...(opts.quality !== undefined ? { quality: opts.quality } : {}) },
-      ...(opts.tile !== undefined ? { tile: opts.tile } : {}),
-      ...(opts.columns !== undefined ? { columns: opts.columns } : {}),
-      ...(opts.maxTiles !== undefined ? { max_tiles: opts.maxTiles } : {}),
-      ...(opts.minInterval !== undefined ? { min_interval: opts.minInterval } : {}),
-    };
-    const answer = await request(cmd, 'video.storyboard', body);
-    const raw = answer.result as {
-      bytes: number;
-      tile: { width: number; height: number };
-      columns: number;
-      rows: number;
-      count: number;
-      interval: number;
-      duration: number;
-    };
-    return {
-      path: opts.output,
-      bytes: raw.bytes,
-      tileWidth: raw.tile.width,
-      tileHeight: raw.tile.height,
-      columns: raw.columns,
-      rows: raw.rows,
-      count: raw.count,
-      interval: raw.interval,
-      duration: raw.duration,
-      producer: producerOf(answer),
-    };
-  });
+export const videoStoryboard = async (cmd: Command, path: string, opts: StoryboardOptions): Promise<StoryboardSheet> => {
+  const body: Record<string, unknown> = {
+    file: { path: path },
+    output: { path: opts.output, format: 'avif', ...(opts.quality !== undefined ? { quality: opts.quality } : {}) },
+    ...(opts.tile !== undefined ? { tile: opts.tile } : {}),
+    ...(opts.columns !== undefined ? { columns: opts.columns } : {}),
+    ...(opts.maxTiles !== undefined ? { max_tiles: opts.maxTiles } : {}),
+    ...(opts.minInterval !== undefined ? { min_interval: opts.minInterval } : {}),
+  };
+  const answer = await request(cmd, 'video.storyboard', body);
+  const raw = answer.result as {
+    bytes: number;
+    tile: { width: number; height: number };
+    columns: number;
+    rows: number;
+    count: number;
+    interval: number;
+    duration: number;
+  };
+  return {
+    path: opts.output,
+    bytes: raw.bytes,
+    tileWidth: raw.tile.width,
+    tileHeight: raw.tile.height,
+    columns: raw.columns,
+    rows: raw.rows,
+    count: raw.count,
+    interval: raw.interval,
+    duration: raw.duration,
+    producer: producerOf(answer),
+  };
+};
 
 /** A video's cuts, from EMS's `video.shots`. */
 type Shots = {
@@ -924,17 +922,16 @@ type ShotsOptions = {
  * Where an upright video — a rendition — cuts from one shot to the next: TransNetV2 over every frame,
  * and EMS's rules with their measured defaults, or the threshold and leader rule the caller gives.
  */
-export const videoShots = async (cmd: Command, path: string, opts: ShotsOptions = {}): Promise<Shots> =>
-  await withHostPath(cmd, path, async (hostPath) => {
-    const body = {
-      file: { path: hostPath },
-      ...(opts.threshold !== undefined ? { threshold: opts.threshold } : {}),
-      ...(opts.leader !== undefined ? { leader: opts.leader } : {}),
-    };
-    const answer = await request(cmd, 'video.shots', body);
-    const raw = answer.result as Omit<Shots, 'producer'>;
-    return { duration: raw.duration, frames: raw.frames, cuts: raw.cuts ?? [], params: raw.params ?? {}, producer: producerOf(answer) };
-  });
+export const videoShots = async (cmd: Command, path: string, opts: ShotsOptions = {}): Promise<Shots> => {
+  const body = {
+    file: { path: path },
+    ...(opts.threshold !== undefined ? { threshold: opts.threshold } : {}),
+    ...(opts.leader !== undefined ? { leader: opts.leader } : {}),
+  };
+  const answer = await request(cmd, 'video.shots', body);
+  const raw = answer.result as Omit<Shots, 'producer'>;
+  return { duration: raw.duration, frames: raw.frames, cuts: raw.cuts ?? [], params: raw.params ?? {}, producer: producerOf(answer) };
+};
 
 type AudioTranscodeOptions = {
   output: string;
@@ -957,26 +954,25 @@ type AudioTranscodeResult = {
 };
 
 /** The web rendition of a recording: AAC in an M4A-branded MP4, never carrying more than the source did. */
-export const transcodeAudio = async (cmd: Command, path: string, opts: AudioTranscodeOptions): Promise<AudioTranscodeResult> =>
-  await withHostPaths(cmd, [path, opts.output], async ([hostPath, output]) => {
-    const body: Record<string, unknown> = {
-      file: { path: hostPath, ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) },
-      output: { path: output, format: 'm4a' },
-      audio: { ...(opts.bitrate ? { bitrate: opts.bitrate } : {}), ...(opts.sampleRate ? { sample_rate: opts.sampleRate } : {}) },
-    };
-    const answer = await request(cmd, 'audio.transcode', body);
-    const raw = answer.result as { duration: number | null; bytes: number; bitrate: number | null; sample_rate: number | null; channels: number | null; remuxed: boolean };
-    return {
-      path: opts.output,
-      duration: raw.duration,
-      bytes: raw.bytes,
-      bitrate: raw.bitrate,
-      sampleRate: raw.sample_rate,
-      channels: raw.channels,
-      remuxed: raw.remuxed === true,
-      producer: producerOf(answer),
-    };
-  });
+export const transcodeAudio = async (cmd: Command, path: string, opts: AudioTranscodeOptions): Promise<AudioTranscodeResult> => {
+  const body: Record<string, unknown> = {
+    file: { path: path, ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) },
+    output: { path: opts.output, format: 'm4a' },
+    audio: { ...(opts.bitrate ? { bitrate: opts.bitrate } : {}), ...(opts.sampleRate ? { sample_rate: opts.sampleRate } : {}) },
+  };
+  const answer = await request(cmd, 'audio.transcode', body);
+  const raw = answer.result as { duration: number | null; bytes: number; bitrate: number | null; sample_rate: number | null; channels: number | null; remuxed: boolean };
+  return {
+    path: opts.output,
+    duration: raw.duration,
+    bytes: raw.bytes,
+    bitrate: raw.bitrate,
+    sampleRate: raw.sample_rate,
+    channels: raw.channels,
+    remuxed: raw.remuxed === true,
+    producer: producerOf(answer),
+  };
+};
 
 type ProbeOptions = { mimetype?: string; hash?: boolean; raw?: ('exiftool' | 'ffprobe')[] };
 
@@ -1018,14 +1014,13 @@ export type ProbeResult = {
  * for the readers that still want a tool's own tag names (`raw.exiftool` is the numeric,
  * ungrouped JSON `exiftool -n -j` writes).
  */
-export const probe = async (cmd: Command, path: string, opts: ProbeOptions = {}): Promise<ProbeResult> =>
-  await withHostPath(cmd, path, async (hostPath) => {
-    const body: Record<string, unknown> = { file: { path: hostPath, ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) } };
-    if (opts.hash) body.hash = true;
-    if (opts.raw) body.raw = opts.raw;
-    const raw = await request(cmd, 'media.probe', body);
-    return { ...(raw.result as Omit<ProbeResult, 'producer'>), producer: producerOf(raw) };
-  });
+export const probe = async (cmd: Command, path: string, opts: ProbeOptions = {}): Promise<ProbeResult> => {
+  const body: Record<string, unknown> = { file: { path: path, ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) } };
+  if (opts.hash) body.hash = true;
+  if (opts.raw) body.raw = opts.raw;
+  const raw = await request(cmd, 'media.probe', body);
+  return { ...(raw.result as Omit<ProbeResult, 'producer'>), producer: producerOf(raw) };
+};
 
 /**
  * Fingerprints for finding copies: an SSCD descriptor for a picture, in the display frame `angle`
@@ -1035,24 +1030,23 @@ export const fingerprint = async (
   cmd: Command,
   path: string,
   opts: { angle?: number; mirror?: boolean; mimetype?: string } = {},
-): Promise<FingerprintResult> =>
-  await withHostPath(cmd, path, async (hostPath) => {
-    const raw = await request(cmd, 'fingerprint.compute', {
-      file: { path: hostPath, angle: opts.angle ?? 0, mirror: opts.mirror ?? false, ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) },
-    });
-    const result = raw.result as {
-      fingerprints: (
-        | { kind: 'sscd-image' | 'sscd-video'; dimension: number; vector: number[]; label: string }
-        | { kind: 'chromaprint'; fingerprint: number[]; label: string }
-      )[];
-    };
-    return {
-      fingerprints: result.fingerprints.map((f): Fingerprint =>
-        f.kind === 'chromaprint' ? { type: f.kind, fingerprint: f.fingerprint, label: f.label } : { type: f.kind, dimension: f.dimension, vector: f.vector, label: f.label }
-      ),
-      producer: producerOf(raw),
-    };
+): Promise<FingerprintResult> => {
+  const raw = await request(cmd, 'fingerprint.compute', {
+    file: { path: path, angle: opts.angle ?? 0, mirror: opts.mirror ?? false, ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) },
   });
+  const result = raw.result as {
+    fingerprints: (
+      | { kind: 'sscd-image' | 'sscd-video'; dimension: number; vector: number[]; label: string }
+      | { kind: 'chromaprint'; fingerprint: number[]; label: string }
+    )[];
+  };
+  return {
+    fingerprints: result.fingerprints.map((f): Fingerprint =>
+      f.kind === 'chromaprint' ? { type: f.kind, fingerprint: f.fingerprint, label: f.label } : { type: f.kind, dimension: f.dimension, vector: f.vector, label: f.label }
+    ),
+    producer: producerOf(raw),
+  };
+};
 
 /** A line of text in a picture: its words, its four corners as fractions of the picture, and how sure the reader is. */
 type TextLine = { text: string; box: [number, number][]; score: number };
@@ -1084,30 +1078,28 @@ export const readText = async (
   cmd: Command,
   path: string,
   opts: { angle?: number; mirror?: boolean; mimetype?: string; language?: string } = {},
-): Promise<ReadTextResult> =>
-  await withHostPath(cmd, path, async (hostPath) => {
-    const raw = await request(cmd, 'ocr.read', {
-      file: { path: hostPath, angle: opts.angle ?? 0, mirror: opts.mirror ?? false, ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) },
-      ...(opts.language ? { language: opts.language } : {}),
-    });
-    const result = raw.result as { text: string; lines: TextLine[]; width: number; height: number };
-    return {
-      text: result.text,
-      lines: result.lines,
-      width: result.width,
-      height: result.height,
-      language: textLanguageOf(raw.meta?.language),
-      producer: producerOf(raw),
-    };
+): Promise<ReadTextResult> => {
+  const raw = await request(cmd, 'ocr.read', {
+    file: { path: path, angle: opts.angle ?? 0, mirror: opts.mirror ?? false, ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) },
+    ...(opts.language ? { language: opts.language } : {}),
   });
+  const result = raw.result as { text: string; lines: TextLine[]; width: number; height: number };
+  return {
+    text: result.text,
+    lines: result.lines,
+    width: result.width,
+    height: result.height,
+    language: textLanguageOf(raw.meta?.language),
+    producer: producerOf(raw),
+  };
+};
 
 /** The text of a document (PDF, DOCX, ODT, plain text), a scanned page OCR'd. */
-export const extractText = async (cmd: Command, path: string, mimetype: string): Promise<ExtractedText> =>
-  await withHostPath(cmd, path, async (hostPath) => {
-    const body: Record<string, unknown> = { file: { path: hostPath, mimetype } };
-    const result = await call(cmd, 'document.extract', body) as { text: string; pages: number; method: string; word_count: number };
-    return { text: result.text, pages: result.pages, method: result.method, wordCount: result.word_count };
-  });
+export const extractText = async (cmd: Command, path: string, mimetype: string): Promise<ExtractedText> => {
+  const body: Record<string, unknown> = { file: { path: path, mimetype } };
+  const result = await call(cmd, 'document.extract', body) as { text: string; pages: number; method: string; word_count: number };
+  return { text: result.text, pages: result.pages, method: result.method, wordCount: result.word_count };
+};
 
 const get = async (cmd: Command, path: string, waitSeconds = 5): Promise<unknown | null> => {
   try {

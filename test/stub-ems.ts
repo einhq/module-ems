@@ -2,7 +2,14 @@
  * A stand-in EMS on loopback for the fast tier: answers each op from a table, records what it
  * was asked, and speaks the real envelope (`{ok, result, meta}` / `{ok:false, error}`), so a
  * caller's handling of both is what gets exercised — never a model.
+ *
+ * It serves itself the files of its requests as `ems-files` serves EMS, in the same process: the
+ * client sends names, and what the stub records and hands its handlers is the file each stands
+ * for, a disk path or the VFS path of a node with none.
  */
+
+import { filesState, lookup } from '../lib/files.ts';
+import { FilesServer } from '../lib/files-server.ts';
 
 export type StubAnswer =
   | { result: unknown; producer?: string; meta?: Record<string, unknown> }
@@ -42,6 +49,22 @@ const envelope = (reply: StubAnswer): { status: number; body: Record<string, unk
   };
 };
 
+/**
+ * A body with each of its names back as the file it stands for (`Named`): the disk path, or the VFS
+ * path of a node with none, which is what a test's stub reads and writes in EMS's place.
+ */
+const unnamed = (value: unknown): unknown => {
+  if (Array.isArray(value)) return value.map(unnamed);
+  if (!value || typeof value !== 'object') return value;
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value)) {
+    const ref = child as Record<string, unknown>;
+    const named = (key === 'file' || key === 'output') && ref && typeof ref.path === 'string' ? lookup(ref.path) : undefined;
+    out[key] = named && named !== 'directory' ? { ...ref, path: named.disk ?? named.node } : unnamed(child);
+  }
+  return out;
+};
+
 export const startStubEms = (options: StubOptions = {}): StubEms => {
   const requests: StubEms['requests'] = [];
   const hungUp: string[] = [];
@@ -73,7 +96,6 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
       return Response.json({
         api: '3.0.0',
         ops: Object.keys(options.ops ?? {}),
-        roots: [],
         tools: {},
         models: {},
         limits: {},
@@ -82,7 +104,7 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
       });
     }
     const op = path.replace('/', '.');
-    const body = req.method === 'POST' ? await req.json() as Record<string, unknown> : {};
+    const body = req.method === 'POST' ? unnamed(await req.json()) as Record<string, unknown> : {};
     requests.push({ op, body, authorization: req.headers.get('authorization') });
     await delay(op);
     const reply = options.ops?.[op];
@@ -109,10 +131,29 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
     return Response.json(answer, { status });
   });
   const addr = server.addr as Deno.NetAddr;
+  const url = `http://127.0.0.1:${addr.port}`;
+  filesState().endpoints.set(url, { address: 'stub-ems:0', emsUrl: url, user: 'ems', secret: 'stub', hostKey: 'ssh-ed25519 stub' });
   return {
-    url: `http://127.0.0.1:${addr.port}`,
+    url,
     requests,
     hungUp,
-    close: () => server.shutdown(),
+    close: () => {
+      filesState().endpoints.delete(url);
+      return server.shutdown();
+    },
   };
+};
+
+/**
+ * An `ems-files` endpoint for a real EMS at `emsUrl`, for a test that calls it without booting EiN:
+ * it serves the files on this host's disk that a request names, reached at `address`
+ * (`CFG_EMS_FILES_ADDRESS`, as EMS sees it) and listening on `port`. An endpoint already serving
+ * `emsUrl` in this process — a booted system's own — is kept, and `stop` leaves it.
+ */
+export const serveEmsFiles = async (emsUrl: string, address: string, port: number): Promise<{ stop: () => Promise<void> }> => {
+  if (filesState().endpoints.has(emsUrl)) return { stop: () => Promise.resolve() };
+  const noNodes = () => Promise.reject(new Error('no VFS here: only files on disk'));
+  const server = new FilesServer({ port, address, emsUrl, nodes: { open: noNodes, stat: noNodes } });
+  await server.start();
+  return { stop: () => server.stop() };
 };

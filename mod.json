@@ -82,9 +82,9 @@
         "type": "string",
         "default": "",
         "label": "Media service file address",
-        "description": "Where the media service reaches EiN's files when it does not mount them, as host:port: the ems-files service's port as EMS sees it. While set, each request to EMS names it, and EMS reads that request's inputs and writes its outputs there, nothing else and only while the request runs. Empty: EMS opens the paths it is sent on its own mounts.",
+        "description": "Where the media service reaches EiN's files, as host:port: the ems-files service's port as EMS sees it. Each request to EMS that names a file names it, and EMS reads that request's inputs and writes its outputs there, nothing else and only while the request runs.",
         "group": "Media service",
-        "emptyMeans": "EMS uses its own mounts",
+        "emptyMeans": "EMS reaches no files: every request that names one waits",
         "restarts": [
           "ems-files"
         ]
@@ -95,7 +95,7 @@
         "type": "number",
         "default": "2224",
         "label": "Media service file port",
-        "description": "The port the ems-files service listens on while the media service file address is set.",
+        "description": "The port the ems-files service listens on.",
         "group": "Media service",
         "restarts": [
           "ems-files"

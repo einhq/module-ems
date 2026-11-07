@@ -1,62 +1,97 @@
 /**
- * ems-files: what a request body grants, and an SFTP session that reaches exactly that.
+ * ems-files: the names a request's files get, and an SFTP session that reaches exactly those.
  *
  * Fast tier: a real server on loopback over a temp directory, reached with ssh2's client the way
- * EMS reaches it — one user, the secret from the header, chacha20-poly1305.
+ * EMS reaches it — one user, the secret from the header, chacha20-poly1305. A node with no file
+ * on disk is played by an in-memory handle.
  */
 
 import { assert, assertEquals, assertRejects } from '@std/assert';
+import type { ResourceHandleIf } from '@ein/client';
 import { Client, type SFTP } from 'ssh2';
 import { FILES_USER, FilesServer } from '../lib/files-server.ts';
-import { filesState, forRequest, grant, granted, requestPaths } from '../lib/files.ts';
+import { filesState, forRequest, grant, lookup } from '../lib/files.ts';
 
 const EMS_URL = 'http://ems.test:8181';
 
-Deno.test('requestPaths: inputs, outputs and output directories at any depth', () => {
-  const paths = requestPaths({
-    file: { path: '/files/ab/one', angle: 0 },
-    targets: [{ output: { path: '/files-volatile/cd/two', format: 'avif' } }, { output: { path: '/files-volatile/cd/../cd/three' } }],
-    output: { dir: '/files-tmp/frames' },
-    options: { priority: 'interactive' },
-    note: { path: '/not/a/file/ref' },
-    relative: { file: { path: 'files/x' } },
-  });
-  assertEquals(paths, {
-    read: ['/files/ab/one'],
-    write: ['/files-volatile/cd/two', '/files-volatile/cd/three'],
-    dirs: ['/files-tmp/frames'],
-  });
+/** The VFS as `grant` asks it: a node's disk path, none for a db-tier node, or no node at all. */
+const vfsOf = (physical: Record<string, string | undefined>) =>
+  ({
+    access: {},
+    sys: {
+      vfs: {
+        stat: (_access: unknown, path: string) => path in physical ? Promise.resolve({ path: physical[path] }) : Promise.reject(new Error('not a node')),
+      },
+    },
+  }) as never;
+
+/** A db-tier node's bytes, behind the part of a VFS handle the endpoint uses. */
+const memoryNode = (bytes: Uint8Array): ResourceHandleIf => {
+  let position = 0;
+  return {
+    seek: (offset: number) => Promise.resolve(position = offset),
+    read: (size: number) => {
+      const out = bytes.subarray(position, position + size);
+      position += out.length;
+      return Promise.resolve(out);
+    },
+    write: (data: Uint8Array) => Promise.resolve(data.length),
+    size: () => Promise.resolve(bytes.length),
+    close: () => Promise.resolve(),
+  } as unknown as ResourceHandleIf;
+};
+
+Deno.test('grant: names in a directory of their own, each standing for its file, gone when released', async () => {
+  const cmd = vfsOf({ '/archive/a/IMG_0001.JPG': '/files/01/01EXAMPLE', '/docs/note.txt': undefined });
+  const { names, release } = await grant(cmd, [
+    { path: '/archive/a/IMG_0001.JPG', mode: 'read' },
+    { path: '/docs/note.txt', mode: 'read' },
+    { path: '/files-tmp/made.bin', mode: 'write' },
+  ]);
+  const directory = names[0].slice(0, names[0].lastIndexOf('/'));
+  assertEquals(names.map((name) => name.slice(directory.length + 1)), ['0-IMG_0001.JPG', '1-note.txt', '2-made.bin']);
+  assertEquals(lookup(names[0]), { mode: 'read', disk: '/files/01/01EXAMPLE' });
+  assertEquals(lookup(names[1]), { mode: 'read', node: '/docs/note.txt' });
+  assertEquals(lookup(names[2]), { mode: 'write', disk: '/files-tmp/made.bin' });
+  assertEquals(lookup('/'), 'directory');
+  assertEquals(lookup(directory), 'directory');
+  assertEquals(lookup('/archive/a/IMG_0001.JPG'), undefined);
+  release();
+  release();
+  assertEquals(lookup(names[0]), undefined);
+  assertEquals(lookup(directory), undefined);
+  assertEquals(filesState().names.size, 0);
 });
 
-Deno.test('grant: counted per request, gone when the last one ends', () => {
-  const first = grant({ read: ['/a/in'], write: ['/a/out'], dirs: [] });
-  const second = grant({ read: ['/a/in'], write: [], dirs: ['/a/frames'] });
-  assert(granted('/a/in', 'read'));
-  assert(!granted('/a/in', 'write'));
-  assert(granted('/a/out', 'write'));
-  assert(!granted('/a/out', 'read'));
-  assert(granted('/a/frames/f-1.jpg', 'write'));
-  assert(!granted('/a/frames/sub/f-1.jpg', 'write'));
-  assert(granted('/a/frames', 'stat'));
-  assert(granted('/a', 'stat') && granted('/', 'stat'));
-  assert(!granted('/a', 'read') && !granted('/b', 'stat'));
-  first();
-  first();
-  assert(granted('/a/in', 'read'));
-  assert(!granted('/a/out', 'write'));
-  second();
-  assert(!granted('/a/in', 'read'));
-  assert(!granted('/a', 'stat') && granted('/', 'stat'));
-  assertEquals(filesState().grants.size, 0);
-  assertEquals(filesState().parents.size, 0);
+Deno.test('forRequest: every file and output at any depth goes by its name', async () => {
+  filesState().endpoints.set(EMS_URL, { address: 'ein.test:2224', emsUrl: EMS_URL, user: FILES_USER, secret: 's', hostKey: 'ssh-ed25519 AAAA' });
+  try {
+    const cmd = vfsOf({ '/archive/a/clip.mp4': '/files/02/02EXAMPLE', '/archive/a/clip.mp4/thumbnails/.tmp-1.avif': '/files-volatile/03/03EXAMPLE' });
+    const sent = (await forRequest(cmd, EMS_URL, {
+      file: { path: '/archive/a/clip.mp4', angle: 90 },
+      targets: [{ output: { path: '/archive/a/clip.mp4/thumbnails/.tmp-1.avif', format: 'avif' } }],
+      options: { priority: 'interactive' },
+    }))!;
+    const body = sent.body as { file: { path: string; angle: number }; targets: { output: { path: string; format: string } }[] };
+    assert(body.file.path.endsWith('/0-clip.mp4') && body.file.angle === 90);
+    assert(body.targets[0].output.path.endsWith('/1-.tmp-1.avif') && body.targets[0].output.format === 'avif');
+    assertEquals(lookup(body.file.path), { mode: 'read', disk: '/files/02/02EXAMPLE' });
+    assertEquals(lookup(body.targets[0].output.path), { mode: 'write', disk: '/files-volatile/03/03EXAMPLE' });
+    assert(sent.headers['ems-files'].startsWith('address=ein.test:2224; user=ems; secret=s; hostkey=ssh-ed25519 '));
+    sent.release();
+    assertEquals(lookup(body.file.path), undefined);
+  } finally {
+    filesState().endpoints.delete(EMS_URL);
+  }
 });
 
-Deno.test('forRequest: no header and no grant unless ems-files serves that media service', async () => {
-  const none = await forRequest(EMS_URL, { file: { path: '/x' } });
-  assertEquals(none.headers, {});
-  assertEquals(none.body, { file: { path: '/x' } });
-  assert(!granted('/x', 'read'));
-  none.release();
+Deno.test('forRequest: a body that names no file goes as it is; one that does needs an endpoint', async () => {
+  const cmd = vfsOf({ '/archive/a/IMG_0001.JPG': '/files/01/01EXAMPLE' });
+  const body = { texts: ['Anna Andersson'] };
+  const sent = (await forRequest(cmd, EMS_URL, body))!;
+  assertEquals([sent.body, sent.headers], [body, {}]);
+  assertEquals(await forRequest(cmd, EMS_URL, { file: { path: '/archive/a/IMG_0001.JPG' } }), undefined);
+  assertEquals(filesState().names.size, 0);
 });
 
 /** Connect as EMS does: the user and secret from the header, the host key pinned, one cipher. */
@@ -90,26 +125,31 @@ const header = (value: string): Record<string, string> =>
   Object.fromEntries(value.split('; ').map((part) => [part.slice(0, part.indexOf('=')), part.slice(part.indexOf('=') + 1)]));
 
 Deno.test({
-  name: 'ems-files: an SFTP session reaches the granted files and nothing else',
+  name: 'ems-files: an SFTP session reaches the names of the requests in flight and nothing else',
   sanitizeResources: false,
   sanitizeOps: false,
   async fn(t) {
     const root = await Deno.makeTempDir({ prefix: 'ems-files-' });
-    await Deno.mkdir(`${root}/in`);
-    await Deno.mkdir(`${root}/out`);
-    await Deno.writeTextFile(`${root}/in/photo.jpg`, 'original bytes');
-    await Deno.writeTextFile(`${root}/in/other.jpg`, 'not granted');
-    await Deno.writeTextFile(`${root}/out/small.avif`, '');
-    await Deno.symlink(`${root}/in/photo.jpg`, `${root}/in/linked.jpg`);
+    await Deno.writeTextFile(`${root}/photo.jpg`, 'original bytes');
+    await Deno.writeTextFile(`${root}/other.jpg`, 'not granted');
+    await Deno.writeTextFile(`${root}/small.avif`, 'an older and longer rendition');
+    await Deno.symlink(`${root}/photo.jpg`, `${root}/linked`);
+    const nodes = {
+      open: () => Promise.resolve(memoryNode(new TextEncoder().encode('db-tier bytes'))),
+      stat: () => Promise.resolve({ size: 13, mtime: 0 }),
+    };
 
-    const server = new FilesServer({ port: 0, address: 'ein.test:2224', emsUrl: EMS_URL });
+    const server = new FilesServer({ port: 0, address: 'ein.test:2224', emsUrl: EMS_URL, nodes });
     const port = await server.start();
-    const request = await forRequest(EMS_URL, {
-      file: { path: `${root}/in/photo.jpg` },
-      targets: [{ output: { path: `${root}/out/small.avif` } }],
-      output: { dir: `${root}/frames` },
-      second: { file: { path: `${root}/in/linked.jpg` } },
-    });
+    const cmd = vfsOf({ '/archive/IMG_0001.JPG': `${root}/linked`, '/docs/note.txt': undefined, '/archive/IMG_0001.JPG/small.avif': `${root}/small.avif` });
+    const request = (await forRequest(cmd, EMS_URL, {
+      file: { path: '/archive/IMG_0001.JPG' },
+      second: { file: { path: '/docs/note.txt' } },
+      targets: [{ output: { path: '/archive/IMG_0001.JPG/small.avif' } }],
+    }))!;
+    const body = request.body as { file: { path: string }; second: { file: { path: string } }; targets: { output: { path: string } }[] };
+    const [input, node, output] = [body.file.path, body.second.file.path, body.targets[0].output.path];
+    const directory = input.slice(0, input.lastIndexOf('/'));
     const named = header(request.headers['ems-files']);
     const { client, sftp } = await connect(port, named.secret, named.hostkey);
 
@@ -120,50 +160,41 @@ Deno.test({
         assert(named.hostkey.startsWith('ssh-ed25519 '));
       });
 
-      await t.step('an input is sent and granted as the file its link leads to', async () => {
-        const real = await Deno.realPath(`${root}/in/photo.jpg`);
-        assertEquals((request.body as { second: { file: { path: string } } }).second.file.path, real);
-        assertEquals(new TextDecoder().decode(await sftp.readFile(real)), 'original bytes');
-        assertEquals((await sftp.stat(real)).size, 'original bytes'.length);
-        await assertRejects(() => sftp.readFile(`${root}/in/linked.jpg`));
+      await t.step('an input is read by its name, on disk through its link, or from the VFS', async () => {
+        assertEquals(new TextDecoder().decode(await sftp.readFile(input)), 'original bytes');
+        assertEquals((await sftp.stat(input)).size, 'original bytes'.length);
+        assertEquals(new TextDecoder().decode(await sftp.readFile(node)), 'db-tier bytes');
+        assertEquals((await sftp.stat(node)).size, 13);
+        const isDirectory = (mode?: number) => ((mode ?? 0) & 0o170000) === 0o040000;
+        assert(isDirectory((await sftp.stat('/')).mode) && isDirectory((await sftp.stat(directory)).mode));
       });
 
-      await t.step('anything not granted is refused: other files, listings, writing an input', async () => {
-        await assertRejects(() => sftp.readFile(`${root}/in/other.jpg`));
-        await assertRejects(() => sftp.stat(`${root}/in/other.jpg`));
-        await assertRejects(() => sftp.readdir(`${root}/in`));
-        await assertRejects(() => sftp.writeFile(`${root}/in/photo.jpg`, new TextEncoder().encode('overwritten')));
-        await assertRejects(() => sftp.readFile(`${root}/out/small.avif`));
-        await assertRejects(() => sftp.unlink(`${root}/in/photo.jpg`));
-        await assertRejects(() => sftp.rename(`${root}/out/small.avif`, `${root}/out/moved.avif`));
-        assertEquals(await Deno.readTextFile(`${root}/in/photo.jpg`), 'original bytes');
+      await t.step('anything else is refused: real paths, other names, listings, writing an input', async () => {
+        await assertRejects(() => sftp.readFile(`${root}/photo.jpg`));
+        await assertRejects(() => sftp.stat(`${root}/other.jpg`));
+        await assertRejects(() => sftp.stat(`${directory}/9-other.jpg`));
+        await assertRejects(() => sftp.readdir('/'));
+        await assertRejects(() => sftp.readdir(directory));
+        await assertRejects(() => sftp.writeFile(input, new TextEncoder().encode('overwritten')));
+        await assertRejects(() => sftp.readFile(output));
+        await assertRejects(() => sftp.mkdir(`${directory}/sub`));
+        await assertRejects(() => sftp.unlink(input));
+        await assertRejects(() => sftp.rename(output, `${directory}/moved.avif`));
+        assertEquals(await Deno.readTextFile(`${root}/photo.jpg`), 'original bytes');
       });
 
       await t.step('an output is written in place, truncated, its bytes there before the handle closes', async () => {
-        await Deno.writeTextFile(`${root}/out/small.avif`, 'an older and longer rendition');
-        const handle = await sftp.open(`${root}/out/small.avif`, 'w');
+        const handle = await sftp.open(output, 'w');
         await sftp.write(handle, new TextEncoder().encode('rendition'), 0, 9, 0);
-        assertEquals(await Deno.readTextFile(`${root}/out/small.avif`), 'rendition');
+        assertEquals(await Deno.readTextFile(`${root}/small.avif`), 'rendition');
         await sftp.close(handle);
-        assertEquals([...Deno.readDirSync(`${root}/out`)].map((entry) => entry.name), ['small.avif']);
       });
 
-      await t.step('a granted directory may be made, and no other', async () => {
-        await sftp.mkdir(`${root}/frames`);
-        assert(Deno.statSync(`${root}/frames`).isDirectory);
-        await assertRejects(() => sftp.mkdir(`${root}/elsewhere`));
-      });
-
-      await t.step('a granted directory takes files directly inside it', async () => {
-        await sftp.writeFile(`${root}/frames/frame-001.jpg`, new TextEncoder().encode('frame'));
-        assertEquals(await Deno.readTextFile(`${root}/frames/frame-001.jpg`), 'frame');
-        await assertRejects(() => sftp.writeFile(`${root}/frames/sub/frame-002.jpg`, new TextEncoder().encode('frame')));
-      });
-
-      await t.step('the grant ends with its request', async () => {
+      await t.step('the names end with their request', async () => {
         request.release();
-        await assertRejects(() => sftp.readFile(`${root}/in/photo.jpg`));
-        await assertRejects(() => sftp.writeFile(`${root}/out/small.avif`, new TextEncoder().encode('late')));
+        await assertRejects(() => sftp.readFile(input));
+        await assertRejects(() => sftp.stat(directory));
+        await assertRejects(() => sftp.writeFile(output, new TextEncoder().encode('late')));
       });
 
       await t.step('a wrong password and another cipher are refused', async () => {
@@ -176,6 +207,6 @@ Deno.test({
       await server.stop();
       await Deno.remove(root, { recursive: true });
     }
-    assertEquals(filesState().endpoint, undefined);
+    assertEquals(filesState().endpoints.has(EMS_URL), false);
   },
 });

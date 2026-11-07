@@ -1,32 +1,36 @@
 /**
- * EiN's files for a media service that does not mount them: which paths a request may touch, and
- * where the service reaches them.
+ * EiN's files for the media service: the names a request's files have for it, and where it
+ * reaches them.
  *
- * EMS opens the physical paths a request names. Beside EiN it mounts the same file tiers at the
- * same paths; on another host it has none of them. The `ems-files` service then serves them over
- * SFTP, and only the paths of the requests in flight: an input to read, an output to write, each
- * for as long as its request runs, and nothing to list. `forRequest` grants a request body's paths
- * and names the endpoint in the `EMS-Files` header; the client holds the grant until the answer
- * is read.
+ * EMS has no files of its own; the `ems-files` service serves it a request's over SFTP. Each request
+ * gets a directory of its own, `/<grant>/`, and each file it names a name there, `<n>-<its VFS
+ * name>`: the request's body says those names, and the endpoint knows what each stands for — a file
+ * on this host's disk, or a node read or written through the VFS — for as long as the request runs.
+ * Nothing else is there, and nothing is listed. The VFS name keeps the original's extension, which
+ * tools pick a format by.
  *
  * The state hangs off `globalThis` rather than this file: a module's files are loaded once per
  * process per content, so a daemon started before a module update and a bin loaded after it run
- * different copies of this file, and must still share one set of grants.
+ * different copies of this file, and must still share one set of names.
  */
 
-import { dirname, normalize } from '@std/path/posix';
+import type { Command } from '@ein/client';
+import { basename, normalize } from '@std/path/posix';
 
-/**
- * What a path is granted for, as counts, since several requests in flight may name the same file:
- * `read` an input, `write` an output file, `files` a directory whose files may be written.
- */
-type Grant = { read: number; write: number; files: number };
+/** What a request's name stands for, and whether it is read or written. */
+export type Named = {
+  mode: 'read' | 'write';
+  /** The file on this host's disk, when there is one. */
+  disk?: string;
+  /** The VFS path of a node with no file on disk (the db tier), read or written through the VFS. */
+  node?: string;
+};
 
-/** The endpoint while `ems-files` serves, as the client names it to EMS. */
+/** An endpoint that serves a media service the files of its requests, as the client names it to EMS. */
 export type FilesEndpoint = {
   /** `host:port`, as EMS reaches this endpoint. */
   address: string;
-  /** The media service the grants are for: the system's own (`CFG_EMS_URL` of the service). */
+  /** The media service the names are for: the system's own (`CFG_EMS_URL` of the service). */
   emsUrl: string;
   user: string;
   /** The password of `user`, made when the service starts and good until it stops. */
@@ -36,153 +40,101 @@ export type FilesEndpoint = {
 };
 
 /**
- * `grants` by path; `parents` counts, for each directory above a granted path, the grants beneath
- * it, so that a client which looks a path up one component at a time (sshfs) can stat its way down.
+ * `endpoints` by the media service they serve; `names` by their full path, `/<grant>/<n>-<name>`;
+ * `grants` are the requests' directories.
  */
-type FilesState = { endpoint?: FilesEndpoint; grants: Map<string, Grant>; parents: Map<string, number> };
+type FilesState = { endpoints: Map<string, FilesEndpoint>; names: Map<string, Named>; grants: Set<string> };
 
-const STATE = Symbol.for('ein.ems.files');
+const STATE = Symbol.for('ein.ems.files.names');
 
 export const filesState = (): FilesState => {
   const global = globalThis as unknown as Record<symbol, FilesState | undefined>;
-  const state = global[STATE] ??= { grants: new Map(), parents: new Map() };
-  // The process may hold a state from a copy of this file that counted no parents.
-  state.parents ??= new Map();
-  return state;
+  return global[STATE] ??= { endpoints: new Map(), names: new Map(), grants: new Set() };
 };
-
-/** The paths an EMS request body names. */
-export type RequestPaths = { read: string[]; write: string[]; dirs: string[] };
 
 /** An absolute path in its one spelling, or undefined for anything else. */
 export const canonical = (path: string): string | undefined => (path.startsWith('/') ? normalize(path) : undefined);
 
-/**
- * Every path in a request body, at any depth: a `file`'s `path` is read, an `output`'s `path` is
- * written and an `output`'s `dir` gets files written into it (`targets[].output` included).
- */
-export const requestPaths = (body: unknown): RequestPaths => {
-  const paths: RequestPaths = { read: [], write: [], dirs: [] };
-  const add = (list: string[], value: unknown) => {
-    const path = typeof value === 'string' ? canonical(value) : undefined;
-    if (path) list.push(path);
-  };
-  const walk = (value: unknown) => {
-    if (Array.isArray(value)) {
-      for (const item of value) walk(item);
-      return;
-    }
-    if (!value || typeof value !== 'object') return;
-    for (const [key, child] of Object.entries(value)) {
-      if (child && typeof child === 'object' && !Array.isArray(child)) {
-        const ref = child as Record<string, unknown>;
-        if (key === 'file') add(paths.read, ref.path);
-        if (key === 'output') {
-          add(paths.write, ref.path);
-          add(paths.dirs, ref.dir);
-        }
-      }
-      walk(child);
-    }
-  };
-  walk(body);
-  return paths;
+/** What a path the endpoint is asked for is: a name, one of the directories, or nothing. */
+export const lookup = (path: string): Named | 'directory' | undefined => {
+  const { names, grants } = filesState();
+  if (path === '/' || grants.has(path)) return 'directory';
+  return names.get(path);
 };
 
-/** Grant `paths` until the returned function is called; calling it again does nothing. */
-/** Every directory above `path`, `/` included. */
-const parentsOf = (path: string): string[] => {
-  const parents: string[] = [];
-  for (let parent = dirname(path);; parent = dirname(parent)) {
-    parents.push(parent);
-    if (parent === '/') return parents;
-  }
-};
-
-export const grant = (paths: RequestPaths): () => void => {
-  const { grants, parents } = filesState();
-  const taken: [string, keyof Grant][] = [
-    ...paths.read.map((path) => [path, 'read'] as [string, keyof Grant]),
-    ...paths.write.map((path) => [path, 'write'] as [string, keyof Grant]),
-    ...paths.dirs.map((path) => [path, 'files'] as [string, keyof Grant]),
-  ];
-  for (const [path, kind] of taken) {
-    const entry = grants.get(path) ?? { read: 0, write: 0, files: 0 };
-    entry[kind] += 1;
-    grants.set(path, entry);
-    for (const parent of parentsOf(path)) parents.set(parent, (parents.get(parent) ?? 0) + 1);
-  }
-  let released = false;
-  return () => {
-    if (released) return;
-    released = true;
-    for (const [path, kind] of taken) {
-      const entry = grants.get(path);
-      if (!entry) continue;
-      entry[kind] -= 1;
-      if (entry.read + entry.write + entry.files <= 0) grants.delete(path);
-      for (const parent of parentsOf(path)) {
-        const left = (parents.get(parent) ?? 1) - 1;
-        if (left > 0) parents.set(parent, left);
-        else parents.delete(parent);
-      }
-    }
-  };
-};
-
-/**
- * Whether a canonical path may be opened to `read` or to `write`, or have its attributes read
- * (`stat`): an input is read, an output or a file in a granted directory written, and anything
- * granted may be stat'ed, a granted directory and the directories above a grant too. `/` always
- * may: a client checks it when it mounts.
- */
-export const granted = (path: string, want: 'read' | 'write' | 'stat'): boolean => {
-  const { grants, parents } = filesState();
-  const entry = grants.get(path);
-  if (want === 'read') return (entry?.read ?? 0) > 0;
-  const inDirectory = (grants.get(dirname(path))?.files ?? 0) > 0;
-  if (want === 'write') return (entry?.write ?? 0) > 0 || inDirectory;
-  return entry !== undefined || inDirectory || path === '/' || parents.has(path);
-};
-
-/** Whether a canonical path is a directory granted to have files written into it. */
-export const grantedDirectory = (path: string): boolean => (filesState().grants.get(path)?.files ?? 0) > 0;
+const hex = (bytes: number): string => Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, '0')).join('');
 
 /** `EMS-Files`'s value: `address=…; user=…; secret=…; hostkey=…`. */
 export const headerValue = (endpoint: FilesEndpoint): string => `address=${endpoint.address}; user=${endpoint.user}; secret=${endpoint.secret}; hostkey=${endpoint.hostKey}`;
 
 /**
- * A request body with every input (`file.path`) named by the file it leads to, where it is a link:
- * EMS reads an original through its mount under the original's own name, whose extension tools
- * pick a format by. An input that is not on this host's disk keeps its path.
+ * Names for `paths` in a directory of their own, until `release` is called: each a VFS path, or a
+ * path on disk the caller made itself, which is what it stands for when it is not a node.
  */
-export const withRealInputs = async (body: unknown): Promise<unknown> => {
-  const real = async (value: unknown): Promise<unknown> => {
-    if (Array.isArray(value)) return await Promise.all(value.map(real));
+export const grant = async (
+  cmd: Pick<Command, 'sys' | 'access'>,
+  paths: { path: string; mode: Named['mode'] }[],
+): Promise<{ names: string[]; release: () => void }> => {
+  const { names, grants } = filesState();
+  const directory = `/${hex(16)}`;
+  const made: string[] = [];
+  for (const [index, { path, mode }] of paths.entries()) {
+    let named: Named = { mode, disk: path };
+    try {
+      const physical = (await cmd.sys.vfs.stat(cmd.access, path)).path;
+      named = typeof physical === 'string' && physical ? { mode, disk: physical } : { mode, node: path };
+    } catch {
+      // Not a node: a file on disk.
+    }
+    const name = `${directory}/${index}-${basename(path) || 'file'}`;
+    names.set(name, named);
+    made.push(name);
+  }
+  grants.add(directory);
+  let released = false;
+  return {
+    names: made,
+    release: () => {
+      if (released) return;
+      released = true;
+      for (const name of made) names.delete(name);
+      grants.delete(directory);
+    },
+  };
+};
+
+/**
+ * For one request to `emsUrl`: the body to send, each `file.path` (read) and `output.path`
+ * (written) in it at any depth replaced by its name, the header naming the endpoint, and `release`,
+ * which ends the names. A body that names no file goes as it is; one that does, when nothing serves
+ * `emsUrl` its files, is undefined.
+ */
+export const forRequest = async <T>(
+  cmd: Pick<Command, 'sys' | 'access'>,
+  emsUrl: string,
+  body: T,
+): Promise<{ body: T; headers: Record<string, string>; release: () => void } | undefined> => {
+  const paths: { path: string; mode: Named['mode'] }[] = [];
+  const refs: Record<string, unknown>[] = [];
+  const copy = (value: unknown): unknown => {
+    if (Array.isArray(value)) return value.map(copy);
     if (!value || typeof value !== 'object') return value;
     const out: Record<string, unknown> = {};
     for (const [key, child] of Object.entries(value)) {
-      if (key === 'file' && child && typeof child === 'object' && typeof (child as { path?: unknown }).path === 'string') {
-        const ref = child as Record<string, unknown>;
-        out[key] = { ...ref, path: await Deno.realPath(ref.path as string).catch(() => ref.path) };
-      } else {
-        out[key] = await real(child);
+      out[key] = copy(child);
+      const ref = out[key] as Record<string, unknown>;
+      if ((key === 'file' || key === 'output') && ref && typeof ref === 'object' && typeof ref.path === 'string') {
+        paths.push({ path: ref.path, mode: key === 'file' ? 'read' : 'write' });
+        refs.push(ref);
       }
     }
     return out;
   };
-  return await real(body);
-};
-
-/**
- * For one request to `emsUrl`: the body to send, its inputs named by their real paths
- * (`withRealInputs`), the header naming the endpoint, and the grant of the body's paths, which
- * `release` ends. The body goes as it was, nothing granted and no header sent, while `ems-files`
- * does not serve, or when the request goes to another media service than the one it serves.
- */
-export const forRequest = async <T>(emsUrl: string, body: T): Promise<{ body: T; headers: Record<string, string>; release: () => void }> => {
-  const endpoint = filesState().endpoint;
-  if (!endpoint || endpoint.emsUrl !== emsUrl) return { body, headers: {}, release: () => {} };
-  const real = await withRealInputs(body) as T;
-  return { body: real, headers: { 'ems-files': headerValue(endpoint) }, release: grant(requestPaths(real)) };
+  const sent = copy(body) as T;
+  if (paths.length === 0) return { body, headers: {}, release: () => {} };
+  const endpoint = filesState().endpoints.get(emsUrl);
+  if (!endpoint) return undefined;
+  const { names, release } = await grant(cmd, paths);
+  refs.forEach((ref, index) => ref.path = names[index]);
+  return { body: sent, headers: { 'ems-files': headerValue(endpoint) }, release };
 };

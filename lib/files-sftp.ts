@@ -1,28 +1,66 @@
 /**
- * The SFTP session of `ems-files`: the paths granted to requests in flight (`granted`) and nothing
- * else.
+ * The SFTP session of `ems-files`: the names of the requests in flight (`lookup`) and nothing else.
  *
- * A path is a file on this host's disk, opened as named and following its links, so an original
- * kept elsewhere is read where its bytes are. An input opens read-only. An output opens write-only
- * and is written in place, truncated first: a client that writes through a mount (sshfs) has its
- * writes on disk when its close returns, while the SFTP close may come later, so nothing waits for
- * that close. A file in a granted directory is written the same way, the directory made when
- * missing or asked for. A directory is never listed, and nothing is removed, renamed, linked or changed in its
- * attributes: each of those is refused.
+ * `/` and each request's directory are directories, which may be stat'ed and never listed; every
+ * other path is one of a request's names or does not exist. A name stands for a file on this host's
+ * disk, opened as it is and following its links, or a node of the VFS with no file on disk. An
+ * input opens read-only. An output opens write-only and is written in place, truncated first: a
+ * client that writes through a mount (sshfs) has its writes there when its close returns, while
+ * the SFTP close may come later, so nothing waits for that close. Nothing is removed, renamed,
+ * linked or changed in its attributes: each of those is refused.
  *
- * A grant is checked when a path is opened or stat'ed; a handle already open stays usable after its
+ * A name is looked up when it is opened or stat'ed; a handle already open stays usable after its
  * request ends, until the client closes it or the session ends.
  */
 
-import { dirname } from '@std/path/posix';
+import type { ResourceHandleIf } from '@ein/client';
 import { OPEN_MODE, type SFTP, STATUS_CODE } from 'ssh2';
-import { canonical, granted, grantedDirectory } from './files.ts';
+import { canonical, lookup, type Named } from './files.ts';
 
 /** The most a READ answers with, what OpenSSH's own server allows. */
 const MAX_READ = 256 * 1024 - 2 * 1024;
 
 /** The most one file call reads or writes for a run of neighbouring requests. */
 const MAX_RUN = 4 * 1024 * 1024;
+
+/** The VFS, for the names that stand for a node with no file on disk. */
+export type NodeAccess = {
+  open(path: string, mode: Named['mode']): Promise<ResourceHandleIf>;
+  stat(path: string): Promise<{ size: number; mtime?: number }>;
+};
+
+/** An open file, on disk or in the VFS, as the session reads and writes it. */
+type Body = {
+  seek(offset: number): Promise<void>;
+  read(into: Uint8Array): Promise<number | null>;
+  write(data: Uint8Array): Promise<number>;
+  size(): Promise<number>;
+  close(): Promise<void>;
+};
+
+const diskBody = async (path: string, mode: Named['mode']): Promise<Body> => {
+  const file = await Deno.open(path, mode === 'read' ? { read: true } : { write: true, create: true, truncate: true });
+  return {
+    seek: async (offset) => void await file.seek(offset, Deno.SeekMode.Start),
+    read: (into) => file.read(into),
+    write: (data) => file.write(data),
+    size: async () => (await file.stat()).size,
+    close: () => Promise.resolve(file.close()),
+  };
+};
+
+const nodeBody = (handle: ResourceHandleIf): Body => ({
+  seek: async (offset) => void await handle.seek(offset, 0),
+  read: async (into) => {
+    const data = await handle.read(into.length);
+    if (data.length === 0) return null;
+    into.set(data);
+    return data.length;
+  },
+  write: (data) => handle.write(data),
+  size: () => handle.size(),
+  close: () => handle.close(),
+});
 
 type ReadRequest = { op: 'read'; reqId: number; offset: number; length: number };
 type WriteRequest = { op: 'write'; reqId: number; offset: number; data: Uint8Array };
@@ -34,11 +72,12 @@ type Queued = ReadRequest | WriteRequest | { op: 'other'; run: () => Promise<voi
  * and each awaited call costs a turn of the event loop whatever its size.
  */
 type Open = {
-  file: Deno.FsFile;
+  kind: Named['mode'];
+  body: Body;
   position: number;
   queued: Queued[];
   draining: boolean;
-} & { kind: 'read' | 'write' };
+};
 
 /** The answers a session sends, which go nowhere once it has ended. */
 type Replies = Pick<SFTP, 'status' | 'handle' | 'data' | 'attrs' | 'name'>;
@@ -48,16 +87,10 @@ const sizeOf = (request: ReadRequest | WriteRequest): number => (request.op === 
 const S_IFREG = 0o100000;
 const S_IFDIR = 0o040000;
 
-const seconds = (time: Date | null): number => Math.floor((time?.getTime() ?? 0) / 1000);
-
-const attrsOf = (info: Deno.FileInfo) => ({
-  mode: (info.isDirectory ? S_IFDIR : S_IFREG) | ((info.mode ?? 0o644) & 0o777),
-  uid: 0,
-  gid: 0,
-  size: info.size,
-  atime: seconds(info.atime ?? info.mtime),
-  mtime: seconds(info.mtime),
-});
+const attrs = (directory: boolean, size: number, mtime: number) => {
+  const seconds = Math.floor(mtime / 1000);
+  return { mode: directory ? S_IFDIR | 0o755 : S_IFREG | 0o644, uid: 0, gid: 0, size, atime: seconds, mtime: seconds };
+};
 
 /** The SFTP status a failed file operation answers with. */
 const statusOf = (error: unknown): number => {
@@ -73,7 +106,7 @@ export class FilesSession {
   private ended = false;
   private out: Replies = { status: () => {}, handle: () => {}, data: () => {}, attrs: () => {}, name: () => {} };
 
-  constructor(private log: (line: string) => void = () => {}) {}
+  constructor(private nodes: NodeAccess, private log: (line: string) => void = () => {}) {}
 
   attach(sftp: SFTP): void {
     const live = <A extends unknown[]>(send: (...args: A) => void) => (...args: A) => {
@@ -111,9 +144,12 @@ export class FilesSession {
     });
     sftp.on('STAT', (reqId: number, path: string) => void this.stat(reqId, path));
     sftp.on('LSTAT', (reqId: number, path: string) => void this.stat(reqId, path));
-    sftp.on('REALPATH', (reqId: number, path: string) => void this.realpath(reqId, path));
+    // A client asks where it is before anything else; the answer reveals nothing.
+    sftp.on('REALPATH', (reqId: number, path: string) => {
+      const resolved = canonical(path.startsWith('/') ? path : `/${path}`) ?? '/';
+      this.out.name(reqId, { filename: resolved, longname: resolved, attrs: {} });
+    });
     sftp.on('OPENDIR', (reqId: number) => this.refuse(reqId, 'listing'));
-    sftp.on('MKDIR', (reqId: number, path: string) => void this.mkdir(reqId, path));
   }
 
   private refuse(reqId: number, what: string): void {
@@ -181,26 +217,21 @@ export class FilesSession {
   }
 
   private async seek(entry: Open, offset: number): Promise<void> {
-    if (entry.position !== offset) entry.position = await entry.file.seek(offset, Deno.SeekMode.Start);
+    if (entry.position === offset) return;
+    await entry.body.seek(offset);
+    entry.position = offset;
   }
 
   private async open(reqId: number, filename: string, flags: number): Promise<void> {
     const path = canonical(filename);
     const writing = (flags & OPEN_MODE.WRITE) !== 0;
     const reading = (flags & OPEN_MODE.READ) !== 0;
-    if (!path || reading === writing) return this.refuse(reqId, `open ${filename}`);
+    const named = path ? lookup(path) : undefined;
+    const mode = reading ? 'read' : 'write';
+    if (!named || named === 'directory' || reading === writing || named.mode !== mode) return this.refuse(reqId, `open ${filename}`);
     try {
-      if (reading) {
-        if (!granted(path, 'read')) return this.refuse(reqId, `read ${path}`);
-        const file = await Deno.open(path, { read: true });
-        this.out.handle(reqId, this.keep({ kind: 'read', file, position: 0, queued: [], draining: false }));
-        return;
-      }
-      if (!granted(path, 'write')) return this.refuse(reqId, `write ${path}`);
-      const directory = dirname(path);
-      if (grantedDirectory(directory)) await Deno.mkdir(directory, { recursive: true });
-      const file = await Deno.open(path, { write: true, create: true, truncate: true });
-      this.out.handle(reqId, this.keep({ kind: 'write', file, position: 0, queued: [], draining: false }));
+      const body = named.disk ? await diskBody(named.disk, mode) : nodeBody(await this.nodes.open(named.node!, mode));
+      this.out.handle(reqId, this.keep({ kind: mode, body, position: 0, queued: [], draining: false }));
     } catch (error) {
       this.out.status(reqId, statusOf(error));
     }
@@ -214,7 +245,7 @@ export class FilesSession {
     try {
       await this.seek(entry, start);
       while (got < buffer.length) {
-        const n = await entry.file.read(buffer.subarray(got));
+        const n = await entry.body.read(buffer.subarray(got));
         if (n === null) break;
         got += n;
       }
@@ -246,7 +277,7 @@ export class FilesSession {
     try {
       await this.seek(entry, run[0].offset);
       let done = 0;
-      while (done < data.length) done += await entry.file.write(data.subarray(done));
+      while (done < data.length) done += await entry.body.write(data.subarray(done));
       entry.position = run[0].offset + done;
     } catch (error) {
       entry.position = -1;
@@ -258,7 +289,7 @@ export class FilesSession {
 
   private async fstat(reqId: number, entry: Open): Promise<void> {
     try {
-      this.out.attrs(reqId, attrsOf(await entry.file.stat()));
+      this.out.attrs(reqId, attrs(false, await entry.body.size(), Date.now()));
     } catch (error) {
       this.out.status(reqId, statusOf(error));
     }
@@ -266,31 +297,16 @@ export class FilesSession {
 
   private async stat(reqId: number, filename: string): Promise<void> {
     const path = canonical(filename);
-    if (!path || !granted(path, 'stat')) return this.refuse(reqId, `stat ${filename}`);
+    const named = path ? lookup(path) : undefined;
+    if (!named) return this.refuse(reqId, `stat ${filename}`);
     try {
-      this.out.attrs(reqId, attrsOf(await Deno.stat(path)));
-    } catch (error) {
-      this.out.status(reqId, statusOf(error));
-    }
-  }
-
-  /**
-   * A granted path with its links resolved, so the client learns an original's own name; any other
-   * path only in its one spelling, which says nothing of whether it exists.
-   */
-  private async realpath(reqId: number, filename: string): Promise<void> {
-    let path = canonical(filename.startsWith('/') ? filename : `/${filename}`) ?? '/';
-    if (granted(path, 'stat')) path = await Deno.realPath(path).catch(() => path);
-    this.out.name(reqId, { filename: path, longname: path, attrs: {} });
-  }
-
-  /** A granted directory made, with what is missing above it; any other is refused. */
-  private async mkdir(reqId: number, filename: string): Promise<void> {
-    const path = canonical(filename);
-    if (!path || !grantedDirectory(path)) return this.refuse(reqId, `mkdir ${filename}`);
-    try {
-      await Deno.mkdir(path, { recursive: true });
-      this.out.status(reqId, STATUS_CODE.OK);
+      if (named === 'directory') return this.out.attrs(reqId, attrs(true, 0, Date.now()));
+      if (named.disk) {
+        const info = await Deno.stat(named.disk);
+        return this.out.attrs(reqId, attrs(false, info.size, info.mtime?.getTime() ?? 0));
+      }
+      const info = await this.nodes.stat(named.node!);
+      this.out.attrs(reqId, attrs(false, info.size, info.mtime ?? 0));
     } catch (error) {
       this.out.status(reqId, statusOf(error));
     }
@@ -298,7 +314,7 @@ export class FilesSession {
 
   private async close(reqId: number, entry: Open): Promise<void> {
     try {
-      entry.file.close();
+      await entry.body.close();
       this.out.status(reqId, STATUS_CODE.OK);
     } catch (error) {
       this.out.status(reqId, statusOf(error));
@@ -312,14 +328,9 @@ export class FilesSession {
     this.handles.clear();
     await Promise.all(left.map((entry) => {
       const { promise, resolve } = Promise.withResolvers<void>();
-      const discard = () => {
-        try {
-          entry.file.close();
-        } catch {
-          // Closed already.
-        }
+      const discard = async () => {
+        await entry.body.close().catch(() => {});
         resolve();
-        return Promise.resolve();
       };
       entry.queued.push({ op: 'other', run: discard });
       if (!entry.draining) {

@@ -1,6 +1,6 @@
 import { Alert, Badge, Box, Button, Card, Collapse, Group, HoverCard, Loader, Progress, SimpleGrid, Skeleton, Stack, Table, Text, Title, Tooltip } from '@mantine/core';
-import type { EmsCaller, EmsCardMode, EmsFamily, EmsLane, EmsModelCopy, EmsModels, EmsModelSize, EmsPlacement, EmsRequest, EmsStatus, EmsWorkerMemory } from '@ems/api';
-import { StatTile, TablerIcon, utilizationColor } from '@ein/ui/components';
+import type { EmsCaller, EmsCardMode, EmsFamily, EmsLane, EmsModelCopy, EmsModels, EmsModelSize, EmsPlacement, EmsRequest, EmsStatus } from '@ems/api';
+import { TablerIcon, utilizationColor } from '@ein/ui/components';
 import { formatUptime } from '@ein/ui/lib';
 import { useState } from 'react';
 import { MemoryMap } from './MemoryMap.tsx';
@@ -116,7 +116,6 @@ export function MediaService({ status, error, history }: Props) {
   return (
     <Stack gap='lg'>
       <Summary status={status} />
-      {status.card && status.card.mode !== 'off' && <CardMode card={status.card} />}
       {status.degraded.map((d) => (
         <Alert key={`${d.what}-${d.reason}`} color='orange' variant='light' icon={<TablerIcon name='alert-triangle' size={16} />} title={`${d.what} degraded`}>
           {d.reason}
@@ -124,7 +123,7 @@ export function MediaService({ status, error, history }: Props) {
         </Alert>
       ))}
       {(status.warnings ?? []).map((warning) => <Alert key={warning} color='yellow' variant='light' icon={<TablerIcon name='alert-triangle' size={16} />}>{warning}</Alert>)}
-      <Memory status={status} />
+      <MemoryMap status={status} />
       <ModelShelf status={status} />
       <ModelTimeline history={history} />
       <ModelDetails families={families} mode={status.card?.mode} />
@@ -171,6 +170,7 @@ function Summary({ status }: { status: Running }) {
         {gpu?.driver && <Fact label='driver' value={gpu.driver} />}
         <Fact label='url' value={status.url} />
       </Group>
+      {status.card && status.card.mode !== 'off' && <CardMode card={status.card} />}
     </Card>
   );
 }
@@ -193,18 +193,18 @@ const MODES: Record<EmsCardMode, { label: string; color: string; says: string }>
 
 const minutes = (seconds: number): string => seconds < 90 ? `${Math.max(0, Math.round(seconds))} s` : `${Math.round(seconds / 60)} min`;
 
-/** Who has the graphics card now, and when that changes. */
+/** Who has the graphics card now, and when that changes: a part of the Media service box. */
 function CardMode({ card }: { card: NonNullable<Running['card']> }) {
   const mode = MODES[card.mode];
   const quietIn = card.mode === 'busy' && card.lastBatch !== undefined && card.quietAfter !== undefined ? card.lastBatch + card.quietAfter - Date.now() / 1000 : undefined;
   return (
-    <Card>
-      <Group gap='xs' mb='xs'>
-        <TablerIcon name='arrows-exchange' size={18} />
-        <Title order={4}>Graphics card mode</Title>
-        <Badge variant='light' color={mode.color} ml='auto'>{mode.label}</Badge>
+    <Stack gap={6} mt='md' pt='sm' style={{ borderTop: '1px solid var(--mrx-hairline)' }}>
+      <Group gap='xs' wrap='nowrap'>
+        <TablerIcon name='arrows-exchange' size={16} />
+        <Text size='sm' fw={600}>Graphics card</Text>
+        <Badge variant='light' color={mode.color}>{mode.label}</Badge>
+        <Text size='sm' c='dimmed'>{mode.says}</Text>
       </Group>
-      <Text size='sm' mb='sm'>{mode.says}</Text>
       <Group gap='xl' wrap='wrap'>
         {card.since !== undefined && <Fact label='since' value={`${ago(card.since)} ago`} tooltip={clock(card.since)} />}
         {card.mode === 'busy' && (
@@ -223,7 +223,7 @@ function CardMode({ card }: { card: NonNullable<Running['card']> }) {
         )}
         {card.quietAfter !== undefined && <Fact label='quiet after' value={minutes(card.quietAfter)} tooltip='How long without indexing work before search gets the card.' />}
       </Group>
-    </Card>
+    </Stack>
   );
 }
 
@@ -239,20 +239,6 @@ function Placement({ placement, why }: { placement: EmsPlacement; why?: string }
   return why ? <Tooltip label={why} withArrow>{badge}</Tooltip> : badge;
 }
 
-/** Worker memory as a tile: RSS against the ceiling the worker rebuilds itself at. */
-function WorkerTile({ label, memory, tooltip }: { label: string; memory: EmsWorkerMemory; tooltip: string }) {
-  const pct = memory.rssMb !== undefined && memory.maxRssMb ? (memory.rssMb / memory.maxRssMb) * 100 : undefined;
-  return (
-    <StatTile
-      label={label}
-      value={megabytes(memory.rssMb)}
-      accent={pct !== undefined ? utilizationColor(pct) : undefined}
-      hint={[memory.maxRssMb ? `ceiling ${megabytes(memory.maxRssMb)}` : '', memory.recycles ? `${memory.recycles} recycle(s)` : ''].filter(Boolean).join(' · ') || undefined}
-      tooltip={tooltip}
-    />
-  );
-}
-
 /**
  * Where the card's memory and the workers' RAM go.
  *
@@ -263,45 +249,6 @@ function WorkerTile({ label, memory, tooltip }: { label: string; memory: EmsWork
  * models) are invisible to it. So the bar splits the card by process, and torch's number is the
  * detail under the worker's segment.
  */
-function Memory({ status }: { status: Running }) {
-  const gpu = status.gpu;
-  return (
-    <Stack gap='sm'>
-      <MemoryMap status={status} />
-      <SimpleGrid cols={{ base: 1, sm: 3 }} spacing='sm'>
-        {gpu?.utilPct !== undefined && (
-          <StatTile
-            label='GPU load'
-            value={`${Math.round(gpu.utilPct)}%`}
-            accent={utilizationColor(gpu.utilPct)}
-            hint={[
-              gpu.decPct !== undefined ? `decode ${Math.round(gpu.decPct)}%` : '',
-              gpu.encPct ? `encode ${Math.round(gpu.encPct)}%` : '',
-              gpu.tempC !== undefined ? `${gpu.tempC} °C` : '',
-              gpu.powerW !== undefined ? `${Math.round(gpu.powerW)}${gpu.powerLimitW ? `/${Math.round(gpu.powerLimitW)}` : ''} W` : '',
-            ]
-              .filter(Boolean).join(' · ') || undefined}
-          />
-        )}
-        {status.rssMb !== undefined && (
-          <WorkerTile
-            label='Batch worker RAM'
-            memory={{ rssMb: status.rssMb, maxRssMb: status.maxRssMb, recycles: status.recycles }}
-            tooltip='Host memory of the indexing model process: models loaded on the CPU, plus every model passes through here while it loads, plus the files being decoded. It rebuilds itself at the ceiling; recycles that keep climbing mean a leak.'
-          />
-        )}
-        {status.queryWorker?.rssMb !== undefined && (
-          <WorkerTile
-            label='Query worker RAM'
-            memory={status.queryWorker}
-            tooltip='Host memory of the search model process. Its models run on the CPU, so this is where they live.'
-          />
-        )}
-      </SimpleGrid>
-    </Stack>
-  );
-}
-
 /** The model's name, with what it is for on hover — nobody remembers what "asd" is. */
 function FamilyName({ family }: { family: EmsFamily }) {
   const name = (

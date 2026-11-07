@@ -160,6 +160,9 @@ export type GpuSample = {
   memUsedMb: number;
   memTotalMb: number;
   tempC: number;
+  /** What the card draws, and the most it may, in watts, when EMS reports them. */
+  powerW?: number;
+  powerLimitW?: number;
 };
 
 /** A point of a recent history: epoch ms and a percentage. */

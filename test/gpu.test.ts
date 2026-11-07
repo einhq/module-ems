@@ -41,6 +41,11 @@ Deno.test('gpuSampleFromHealth: the decoder and encoder ride along when EMS repo
   assertEquals(gpuSampleFromHealth({ ...HEALTH, gpu }), { utilPct: 37.4, decPct: 21, encPct: 0, memUsedMb: 8123, memTotalMb: 16311, tempC: 51 });
 });
 
+Deno.test('gpuSampleFromHealth: the power draw and its limit ride along when EMS reports them', () => {
+  const gpu = { ...HEALTH.gpu, power_w: 17.4, power_limit_w: 180 };
+  assertEquals(gpuSampleFromHealth({ ...HEALTH, gpu }), { utilPct: 37, memUsedMb: 8123, memTotalMb: 16311, tempC: 51, powerW: 17.4, powerLimitW: 180 });
+});
+
 Deno.test('gpuSampleFromHealth: a card EMS cannot read is no sample', () => {
   // `present` alone — torch's view or no view — says nothing about utilization.
   assertEquals(gpuSampleFromHealth({ ok: true, gpu: { present: true, vram_reserved_mb: 7900 } }), undefined);

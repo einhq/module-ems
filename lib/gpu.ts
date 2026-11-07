@@ -17,7 +17,16 @@ import type { GpuSample } from '@ems/api';
 const EMS_TIMEOUT_MS = 5000;
 
 /** EMS's `health.gpu`, in its own field names. Anything else in the body is not read here. */
-type EmsHealthGpu = { util_pct?: unknown; dec_pct?: unknown; enc_pct?: unknown; mem_used_mb?: unknown; mem_total_mb?: unknown; temp_c?: unknown };
+type EmsHealthGpu = {
+  util_pct?: unknown;
+  dec_pct?: unknown;
+  enc_pct?: unknown;
+  mem_used_mb?: unknown;
+  mem_total_mb?: unknown;
+  temp_c?: unknown;
+  power_w?: unknown;
+  power_limit_w?: unknown;
+};
 
 const finite = (value: unknown): number | undefined => (typeof value === 'number' && Number.isFinite(value) ? value : undefined);
 
@@ -32,7 +41,18 @@ export const gpuSampleFromHealth = (body: unknown): GpuSample | undefined => {
   if (utilPct === undefined || memUsedMb === undefined || memTotalMb === undefined || tempC === undefined) return undefined;
   const decPct = finite(gpu.dec_pct);
   const encPct = finite(gpu.enc_pct);
-  return { utilPct, ...(decPct !== undefined ? { decPct } : {}), ...(encPct !== undefined ? { encPct } : {}), memUsedMb, memTotalMb, tempC };
+  const powerW = finite(gpu.power_w);
+  const powerLimitW = finite(gpu.power_limit_w);
+  return {
+    utilPct,
+    ...(decPct !== undefined ? { decPct } : {}),
+    ...(encPct !== undefined ? { encPct } : {}),
+    memUsedMb,
+    memTotalMb,
+    tempC,
+    ...(powerW !== undefined ? { powerW } : {}),
+    ...(powerLimitW !== undefined ? { powerLimitW } : {}),
+  };
 };
 
 /** One reading, asked of the EMS at `cmd.env.CFG_EMS_URL`. */

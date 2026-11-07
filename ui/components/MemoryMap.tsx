@@ -108,9 +108,11 @@ export function MemoryMap({ status }: { status: Running }) {
   ];
   const ramTotal = ram.reduce((sum, segment) => sum + segment.mb, 0);
   const standby = inRam.filter((holding) => holding.standby);
+  // Each worker rebuilds itself at its ceiling; a count of rebuilds that keeps climbing is a leak.
+  const rebuilt = (n?: number) => (n ? `, rebuilt ${n} time${n === 1 ? '' : 's'} so far` : '');
   const ceilings = [
-    status.maxRssMb ? `the batch worker rebuilds itself at ${size(status.maxRssMb)}` : '',
-    status.queryWorker?.maxRssMb ? `the query worker at ${size(status.queryWorker.maxRssMb)}` : '',
+    status.maxRssMb ? `the batch worker rebuilds itself at ${size(status.maxRssMb)}${rebuilt(status.recycles)}` : '',
+    status.queryWorker?.maxRssMb ? `the query worker at ${size(status.queryWorker.maxRssMb)}${rebuilt(status.queryWorker.recycles)}` : '',
   ].filter(Boolean);
 
   return (

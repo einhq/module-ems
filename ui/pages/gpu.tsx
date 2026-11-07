@@ -21,7 +21,12 @@ export default function GpuPanel() {
         value={pct(gpu.utilPct)}
         accent={utilizationColor(gpu.utilPct)}
         icon={<TablerIcon name='cpu-2' size={14} />}
-        hint={[`${gpu.tempC}°C`, ...(gpu.decPct !== undefined ? [`decode ${pct(gpu.decPct)}`] : []), ...(gpu.encPct ? [`encode ${pct(gpu.encPct)}`] : [])].join(' · ')}
+        hint={[
+          `${gpu.tempC}°C`,
+          ...(gpu.powerW !== undefined ? [`${Math.round(gpu.powerW)}${gpu.powerLimitW ? `/${Math.round(gpu.powerLimitW)}` : ''} W`] : []),
+          ...(gpu.decPct !== undefined ? [`decode ${pct(gpu.decPct)}`] : []),
+          ...(gpu.encPct ? [`encode ${pct(gpu.encPct)}`] : []),
+        ].join(' · ')}
         tooltip="Compute load on the media service's card over the seconds before each reading; video decoding and encoding run on units of their own"
         series={gpu.utilSeries}
       />

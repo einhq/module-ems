@@ -4,19 +4,17 @@
  * media service's reads and writes never wait for EiN's event loop, and several connections are
  * served on several CPUs.
  *
- * This side makes the keys, publishes the endpoint, starts a session thread whenever the listening
- * thread asks for one, keeps each session thread's copy of the names (every grant waits until all
- * have it), and answers their calls on nodes with no file on disk through the VFS. A thread that
+ * This side makes the credentials, publishes the endpoint, starts a session thread whenever the
+ * listening thread asks for one, keeps each session thread's copy of the names (every grant waits
+ * until all have it), and answers their calls on nodes with no file on disk through the VFS. A thread that
  * dies settles `failed`, and nothing is served from then on.
  */
 
-import { FILES_USER, type FilesKeys, makeKeys } from './files-ssh.ts';
+import { makeTls } from './files-cert.ts';
 import type { NodeAccess, NodeHandle } from './files-sftp.ts';
 import { type FilesEndpoint, filesState, type NamesMirror } from './files.ts';
-import { type FromListen, LISTEN_URL, type ToListen } from './files-listen.ts';
+import { type Auth, type FromListen, LISTEN_URL, type ToListen } from './files-listen.ts';
 import { type FromThread, type NodeCall, THREAD_URL, type ToThread } from './files-thread.ts';
-
-export { FILES_USER };
 
 /** The most threads that serve connections; the media service mounts with as many connections. */
 const SESSION_THREADS = 4;
@@ -28,6 +26,8 @@ type FilesServerOptions = {
   address: string;
   /** The media service the names are for. */
   emsUrl: string;
+  /** Whether connections are TLS, each side pinning the other's certificate, rather than plain. */
+  tls?: boolean;
   /** The VFS, for the names of nodes with no file on disk. */
   nodes: NodeAccess;
   log?: (line: string) => void;
@@ -53,7 +53,7 @@ class SessionThread {
   private started = Promise.withResolvers<void>();
   private stopped = Promise.withResolvers<void>();
 
-  constructor(keys: FilesKeys, link: MessagePort, private options: FilesServerOptions, private fail: (error: Error) => void) {
+  constructor(link: MessagePort, private options: FilesServerOptions, private fail: (error: Error) => void) {
     this.worker = new Worker(THREAD_URL, { type: 'module' });
     this.worker.onmessage = ({ data }: MessageEvent<FromThread>) => guarded(options.log, () => this.message(data));
     this.worker.onerror = (event: ErrorEvent) => {
@@ -62,7 +62,7 @@ class SessionThread {
     };
     const { names, grants, mirrors } = filesState();
     // The copy starts with the names granted so far; the changes after follow it in order.
-    this.post({ op: 'start', hostKey: keys.host.private, clientKey: keys.client.public, names: { set: [...names], grants: [...grants] }, link }, [link]);
+    this.post({ op: 'start', names: { set: [...names], grants: [...grants] }, link }, [link]);
     this.mirror = (change) => {
       const seq = this.nextAck++;
       const { promise, resolve } = Promise.withResolvers<void>();
@@ -164,7 +164,6 @@ class SessionThread {
 export class FilesServer {
   private listener?: Worker;
   private sessions: SessionThread[] = [];
-  private keys?: FilesKeys;
   private endpoint?: FilesEndpoint;
   private listening?: PromiseWithResolvers<number>;
   private stopped?: PromiseWithResolvers<void>;
@@ -175,9 +174,19 @@ export class FilesServer {
 
   constructor(private options: FilesServerOptions) {}
 
-  /** Start the threads, listen, and publish the endpoint to the client; the port actually listened on. */
+  /** Make the credentials, start the threads, listen, and publish the endpoint to the client; the port actually listened on. */
   async start(): Promise<number> {
-    const keys = this.keys = await makeKeys();
+    // Made at each start and kept in memory only, so a restart leaves no credential behind that still works.
+    const credentials: Pick<FilesEndpoint, 'secret' | 'tls'> = {};
+    let auth: Auth;
+    if (this.options.tls) {
+      const tls = await makeTls();
+      auth = { tls: { server: tls.server, client: tls.client.cert } };
+      credentials.tls = { server: tls.server.cert, client: tls.client };
+    } else {
+      credentials.secret = Array.from(crypto.getRandomValues(new Uint8Array(32)), (b) => b.toString(16).padStart(2, '0')).join('');
+      auth = { secret: credentials.secret };
+    }
     const listener = new Worker(LISTEN_URL, { type: 'module' });
     this.listener = listener;
     this.listening = Promise.withResolvers();
@@ -186,11 +195,11 @@ export class FilesServer {
       event.preventDefault();
       guarded(this.options.log, () => this.fail(new Error(`ems-files listening thread: ${event.message}`)));
     };
-    this.post({ op: 'start', port: this.options.port, sessions: SESSION_THREADS });
+    this.post({ op: 'start', port: this.options.port, sessions: SESSION_THREADS, auth });
     // The first session thread starts with the listener, so the first connection does not wait for one.
     this.more();
     const port = await this.listening.promise;
-    this.endpoint = { address: this.options.address, emsUrl: this.options.emsUrl, user: FILES_USER, key: keys.client.private, hostKey: keys.host.public };
+    this.endpoint = { address: this.options.address, emsUrl: this.options.emsUrl, ...credentials };
     filesState().endpoints.set(this.options.emsUrl, this.endpoint);
     return port;
   }
@@ -212,9 +221,9 @@ export class FilesServer {
 
   /** Start a session thread, and hand it to the listening thread once it serves. */
   private more(): void {
-    if (!this.keys || this.sessions.length >= SESSION_THREADS) return;
+    if (!this.listener || this.sessions.length >= SESSION_THREADS) return;
     const { port1, port2 } = new MessageChannel();
-    const session = new SessionThread(this.keys, port1, this.options, (error) => this.fail(error));
+    const session = new SessionThread(port1, this.options, (error) => this.fail(error));
     this.sessions.push(session);
     session.ready.then(() => this.post({ op: 'session', link: port2 }, [port2]), () => {});
   }

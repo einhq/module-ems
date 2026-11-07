@@ -3,7 +3,9 @@
  * ems-files — serve the media service the files of its requests in flight over SFTP: EMS mounts
  * none of EiN's file tiers.
  *
- * Runs as the `ems-files` service. It listens on `CFG_EMS_FILES_PORT`, and every request to the
+ * Runs as the `ems-files` service. It listens on `CFG_EMS_FILES_PORT`: plain, each connection
+ * answering a challenge on a secret first, or with `CFG_EMS_FILES_TLS` TLS, each side pinning the
+ * other's certificate. Every request to the
  * system's own EMS that names a file names this endpoint, as `CFG_EMS_FILES_ADDRESS` says EMS
  * reaches it, in its `EMS-Files` header: EMS reads the request's inputs and writes back its outputs
  * here, and nothing else, for as long as the request runs. With the address empty it serves
@@ -30,6 +32,7 @@ const emsFiles = async (cmd: Command): CmdReturn => {
     await cmd.writeError(`ems-files: CFG_EMS_FILES_PORT: not a port: ${cmd.env.CFG_EMS_FILES_PORT}\n`);
     return 1;
   }
+  const tls = (cmd.env.CFG_EMS_FILES_TLS ?? '').trim() === 'true';
   const url = emsUrl(cmd);
   const nodes = {
     open: (path: string, mode: 'read' | 'write') => cmd.sys.vfs.open(cmd.access, path, { mode: mode === 'read' ? 'r' as const : 'w' as const }),
@@ -38,10 +41,10 @@ const emsFiles = async (cmd: Command): CmdReturn => {
       return { size: Number(stat.size ?? 0), mtime: typeof stat.mtime === 'number' ? stat.mtime : undefined };
     },
   };
-  const server = new FilesServer({ port, address, emsUrl: url, nodes, log: (line) => void cmd.writeLn(line).catch(() => {}) });
+  const server = new FilesServer({ port, address, emsUrl: url, tls, nodes, log: (line) => void cmd.writeLn(line).catch(() => {}) });
   try {
     const listening = await server.start();
-    await cmd.writeLn(`ems-files: serving the files of requests to ${url} on port ${listening}, as ${address}`);
+    await cmd.writeLn(`ems-files: serving the files of requests to ${url} on port ${listening}, as ${address}, ${tls ? 'over TLS' : 'plain'}`);
     const failed = await Promise.race([stopped, server.failed]);
     if (failed) throw failed;
   } catch (error) {

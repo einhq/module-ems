@@ -66,17 +66,22 @@ function per op — `transcribe`, `embedTexts`, `embedImage`, `embedImageText`, 
 `voiceprint`, `activeSpeakers`, `fingerprint`, `extractText`, `probe`, the renditions and the
 transcodes, plus `health` and what `capabilities` says each result is stamped with now (`generations`) — and sends
 every file by a name of its own: EMS mounts no file tier, and reaches a request's files through the
-`ems-files` service, an SFTP endpoint that offers only chacha20-poly1305, lists nothing, and serves
-each request a directory of its own, `/<grant>/<n>-<VFS name>`, for as long as it runs
-([files.ts](../lib/files.ts)). The request's `EMS-Files` header names the endpoint, its one user,
-the secret made when the service started and its host key; EMS mounts it with sshfs, reads the
-inputs there, and copies what it wrote back before it answers. A name stands for the node's file
-on disk, or for the node itself when it has none (the db tier), read and written through the VFS.
-The SSH server and its sessions run on a worker of their own ([files-thread.ts](../lib/files-thread.ts)),
-which keeps a copy of the names and reads and writes the files on disk itself, so EMS's reads do
-not wait behind the pipelines on EiN's event loop; only a db-tier node's calls go back to EiN's
-thread, one message each ([files-server.ts](../lib/files-server.ts)). A grant returns once the
-worker has its names. `CFG_EMS_FILES_ADDRESS` is the endpoint as EMS reaches it; while it is empty or the service is
+`ems-files` service, an SFTP endpoint that lists nothing and serves each request a directory of
+its own, `/<grant>/<n>-<VFS name>`, for as long as it runs ([files.ts](../lib/files.ts)). It speaks
+SFTP straight on the connection, with no SSH. By default a connection is plain: the endpoint sends
+a challenge and the client answers it with an HMAC on the secret made when the service started,
+which suits EMS on the same machine or network. With `CFG_EMS_FILES_TLS` it is TLS, the endpoint
+and EMS each pinning the other's certificate, both made at start
+([files-cert.ts](../lib/files-cert.ts)). The request's `EMS-Files` header names the endpoint and
+the secret, or the certificates; EMS mounts it with sshfs, reads the inputs there, and copies what
+it wrote back before it answers. A name stands for the node's file on disk, or for the node itself
+when it has none (the db tier), read and written through the VFS. A thread of its own listens,
+authenticates each connection and carries its bytes ([files-listen.ts](../lib/files-listen.ts)) to
+up to four session threads ([files-thread.ts](../lib/files-thread.ts)), each serving SFTP sessions
+with a copy of the names and reading and writing the files on disk itself, so EMS's reads do not
+wait behind the pipelines on EiN's event loop; only a db-tier node's calls go back to EiN's thread,
+one message each ([files-server.ts](../lib/files-server.ts)). A grant returns once every session
+thread has its names. `CFG_EMS_FILES_ADDRESS` is the endpoint as EMS reaches it; while it is empty or the service is
 not serving, a request that names a file is `EmsUnavailableError` and waits. Three outcomes stay distinct for everything downstream:
 `EmsUnavailableError` (unreachable, timed out, interrupted, `busy`, or a model worker still loading —
 the step exits `STEP_EXIT_TEMPORARY` through `stepExitCode` and waits without spending an attempt),
@@ -93,8 +98,8 @@ conversation belongs to the assistant's own model service (`modules/assistant/li
 `CFG_LLM_URL`), which may be a provider elsewhere, so no processing step depends on it.
 
 Configuration is `CFG_EMS_URL`, `CFG_EMS_KEY`, a secret the client sends only to the system's
-own `CFG_EMS_URL` (`serviceKey`), and `CFG_EMS_FILES_ADDRESS` and `CFG_EMS_FILES_PORT`, where
-`ems-files` is reached and where it listens. A batch request has no ceiling: it
+own `CFG_EMS_URL` (`serviceKey`), and `CFG_EMS_FILES_ADDRESS`, `CFG_EMS_FILES_PORT` and
+`CFG_EMS_FILES_TLS`, where `ems-files` is reached, where it listens, and whether over TLS. A batch request has no ceiling: it
 waits for EMS's answer however long a cold model load and the work queued ahead of it take, and
 only a caller a person is waiting on names a timeout of its own. The thirteen model settings the `inference` module used to declare — which model, quantization,
 pinning, idle eviction, the RSS ceiling, the whisper decode options — are EMS's environment now and

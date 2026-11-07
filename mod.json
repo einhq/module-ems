@@ -102,6 +102,18 @@
         ]
       },
       {
+        "key": "CFG_EMS_FILES_TLS",
+        "scope": "system",
+        "type": "boolean",
+        "default": "false",
+        "label": "Media service files over TLS",
+        "description": "Encrypt the media service's file connections with TLS, each side pinning the other's certificate. Off, a connection proves it is the media service's with a secret and is not encrypted, which costs half the CPU and suits EMS on the same machine or network. Turn it on when EMS reaches EiN over a network you do not trust.",
+        "group": "Media service",
+        "restarts": [
+          "ems-files"
+        ]
+      },
+      {
         "key": "CFG_WHISPER_LANGUAGE",
         "scope": "system",
         "type": "string",

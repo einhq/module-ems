@@ -132,7 +132,7 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
   });
   const addr = server.addr as Deno.NetAddr;
   const url = `http://127.0.0.1:${addr.port}`;
-  filesState().endpoints.set(url, { address: 'stub-ems:0', emsUrl: url, user: 'ems', key: 'stub', hostKey: 'ssh-ed25519 stub' });
+  filesState().endpoints.set(url, { address: 'stub-ems:0', emsUrl: url, secret: 'stub' });
   return {
     url,
     requests,

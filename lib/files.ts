@@ -34,11 +34,10 @@ export type FilesEndpoint = {
   address: string;
   /** The media service the names are for: the system's own (`CFG_EMS_URL` of the service). */
   emsUrl: string;
-  user: string;
-  /** The private key `user` signs in with, in OpenSSH's format, made when the service starts and good until it stops. */
-  key: string;
-  /** The host key's public half, `ssh-ed25519 AAAA…`, which EMS pins. */
-  hostKey: string;
+  /** The secret a plain connection answers the challenge with, in hex. */
+  secret?: string;
+  /** For TLS: the server's certificate, which EMS pins, and the client certificate and key EMS presents, all PEM. */
+  tls?: { server: string; client: { cert: string; key: string } };
 };
 
 /** Names and directories added or ended together, as a copy of the names takes them in. */
@@ -88,8 +87,14 @@ export const lookup = (path: string): Named | 'directory' | undefined => {
 
 const hex = (bytes: number): string => Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, '0')).join('');
 
-/** `EMS-Files`'s value: `address=…; user=…; key=…; hostkey=…`, the key's file in base64. */
-export const headerValue = (endpoint: FilesEndpoint): string => `address=${endpoint.address}; user=${endpoint.user}; key=${btoa(endpoint.key)}; hostkey=${endpoint.hostKey}`;
+/**
+ * `EMS-Files`'s value: `address=…; secret=…` for a plain endpoint, or `address=…; tls=…; client=…`
+ * for TLS, the server's certificate and the client's certificate and key as PEM in base64.
+ */
+export const headerValue = (endpoint: FilesEndpoint): string =>
+  endpoint.tls
+    ? `address=${endpoint.address}; tls=${btoa(endpoint.tls.server)}; client=${btoa(endpoint.tls.client.cert + endpoint.tls.client.key)}`
+    : `address=${endpoint.address}; secret=${endpoint.secret}`;
 
 /**
  * Names for `paths` in a directory of their own, until `release` is called: each a VFS path, or a

@@ -1,7 +1,7 @@
 /**
- * A thread `ems-files` serves on: an SSH server and its sessions for the connections the listening
- * thread (files-listen.ts) hands it, with a copy of the names of the requests in flight, so that
- * no SFTP request waits on EiN's own event loop or on another connection's. Only a name that
+ * A thread `ems-files` serves on: an SFTP session for each connection the listening thread
+ * (files-listen.ts) hands it, authenticated already, with a copy of the names of the requests in
+ * flight, so that no SFTP request waits on EiN's own event loop or on another connection's. Only a name that
  * stands for a node with no file on disk goes back to EiN's thread, each call on its handle a
  * message there and back (`NodeCall`).
  *
@@ -9,10 +9,9 @@
  * which is the staged copy a `#!ts` bin was loaded with.
  */
 
-import type { adapters } from 'ssh2';
+import { SFTP } from 'ssh2';
 import { type Link, WINDOW } from './files-listen.ts';
-import { FilesSshServer } from './files-ssh.ts';
-import type { NodeAccess, NodeHandle } from './files-sftp.ts';
+import { FilesSession, type NodeAccess, type NodeHandle } from './files-sftp.ts';
 import { changeNames, type Named, type NamesChange } from './files.ts';
 
 export const THREAD_URL = import.meta.url;
@@ -30,7 +29,7 @@ export type NodeCall =
 type CallError = { name: string; message: string };
 
 export type ToThread =
-  | { op: 'start'; hostKey: string; clientKey: string; names: NamesChange; link: MessagePort }
+  | { op: 'start'; names: NamesChange; link: MessagePort }
   | { op: 'names'; seq: number; change: NamesChange }
   | { op: 'answer'; id: number; value?: unknown; error?: CallError }
   | { op: 'stop' };
@@ -54,95 +53,93 @@ const errorOf = ({ name, message }: CallError): Error => {
 };
 
 /**
- * One connection as SSH reads and writes it, its bytes carried by the listening thread. A write
- * waits while `WINDOW` bytes or more of it are not yet on the socket.
+ * One connection's SFTP session, its bytes carried by the listening thread: what arrives is pushed
+ * into the session as it is (each a buffer handed over, which nothing else holds), and what the
+ * session answers in one turn goes back as one message. Answers wait while `WINDOW` bytes or more
+ * of them are not yet on the socket.
  */
-class LinkTransport implements adapters.Transport {
-  closed = false;
-  readonly writable: WritableStream<Uint8Array>;
-  private chunks: Uint8Array[] = [];
+class LinkSession {
   private ended = false;
-  private arrived?: PromiseWithResolvers<void>;
+  private sftp: SFTP;
+  private files: FilesSession;
+  private pending: Uint8Array[] = [];
+  private flushing = false;
   private taken = 0;
   private unwritten = 0;
   private room?: PromiseWithResolvers<void>;
-  private stream?: ReadableStream<Uint8Array>;
 
   constructor(
     private id: number,
     private send: (message: Link, transfer?: Transferable[]) => void,
+    nodes: NodeAccess,
+    log: (line: string) => void,
     private done: () => void,
-    readonly remoteAddress?: string,
-    readonly remotePort?: number,
   ) {
-    this.writable = new WritableStream({
-      write: async (chunk) => {
-        if (this.closed) throw new Error('ems-files: the connection is closed');
-        // A copy of the chunk's bytes alone: SSH may reuse its buffer, and the copy is handed over.
-        const data = chunk.slice();
-        this.unwritten += data.length;
-        this.send({ op: 'data', id, data }, [data.buffer]);
-        while (this.unwritten >= WINDOW && !this.closed) await (this.room = Promise.withResolvers()).promise;
-      },
-      close: () => this.close(),
-      abort: () => this.close(),
-    });
-  }
-
-  get readable(): ReadableStream<Uint8Array> {
-    return this.stream ??= new ReadableStream({
-      pull: async (controller) => {
-        const buffer = new Uint8Array(64 * 1024);
-        const n = await this.read(buffer);
-        if (n === null) controller.close();
-        else controller.enqueue(buffer.subarray(0, n));
-      },
-    });
-  }
-
-  async read(buffer: Uint8Array): Promise<number | null> {
-    while (this.chunks.length === 0) {
-      if (this.ended || this.closed) return null;
-      await (this.arrived = Promise.withResolvers()).promise;
-    }
-    const chunk = this.chunks[0];
-    const n = Math.min(buffer.length, chunk.length);
-    buffer.set(chunk.subarray(0, n));
-    if (n === chunk.length) this.chunks.shift();
-    else this.chunks[0] = chunk.subarray(n);
-    // Taken bytes are told in batches, well before the listening thread would wait for them.
-    this.taken += n;
-    if (this.taken >= WINDOW / 4) {
-      this.send({ op: 'took', id: this.id, n: this.taken });
-      this.taken = 0;
-    }
-    return n;
+    const queue = (parts: readonly Uint8Array[]) => {
+      this.pending.push(...parts);
+      if (!this.flushing) queueMicrotask(() => void this.flush());
+    };
+    // The session is the channel's only user and nothing limits it but `WINDOW`, so it never waits for a window.
+    const endpoint = { id: 0, window: Number.MAX_SAFE_INTEGER, packetSize: Number.MAX_SAFE_INTEGER, state: 'open' };
+    this.sftp = new SFTP(
+      { protocol: { channelData: (_id, data) => queue([data]), channelDataParts: (_id, parts) => queue(parts), channelClose: () => void this.end() } },
+      { type: 'session', incoming: { ...endpoint }, outgoing: { ...endpoint } },
+      { server: true },
+    );
+    this.files = new FilesSession(nodes, log);
+    this.files.attach(this.sftp);
   }
 
   /** What the listening thread says of this connection. */
   take(message: Link): void {
     switch (message.op) {
       case 'data':
-        this.chunks.push(message.data);
-        return this.arrived?.resolve();
+        if (this.ended) return;
+        this.sftp.push(message.data);
+        // Taken bytes are told in batches, well before the listening thread would wait for them.
+        this.taken += message.data.length;
+        if (this.taken >= WINDOW / 4) {
+          this.send({ op: 'took', id: this.id, n: this.taken });
+          this.taken = 0;
+        }
+        return;
       case 'took':
         this.unwritten -= message.n;
         if (this.unwritten < WINDOW) this.room?.resolve();
         return;
       case 'end':
-        this.ended = true;
-        this.arrived?.resolve();
-        return this.close();
+        return void this.end(false);
     }
   }
 
-  close(): void {
-    if (this.closed) return;
-    this.closed = true;
-    if (!this.ended) this.send({ op: 'end', id: this.id });
-    this.arrived?.resolve();
+  /** The session's answers so far, copied into one buffer each round and handed over. */
+  private async flush(): Promise<void> {
+    this.flushing = true;
+    while (this.pending.length > 0 && !this.ended) {
+      const parts = this.pending;
+      this.pending = [];
+      const data = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
+      let at = 0;
+      for (const part of parts) {
+        data.set(part, at);
+        at += part.length;
+      }
+      this.unwritten += data.length;
+      this.send({ op: 'data', id: this.id, data }, [data.buffer]);
+      while (this.unwritten >= WINDOW && !this.ended) await (this.room = Promise.withResolvers()).promise;
+    }
+    this.flushing = false;
+  }
+
+  /** End the session, and the connection unless it ended first; settles once its files are closed. */
+  end(tell = true): Promise<void> {
+    if (this.ended) return Promise.resolve();
+    this.ended = true;
+    if (tell) this.send({ op: 'end', id: this.id });
     this.room?.resolve();
+    this.sftp.push(null);
     this.done();
+    return this.files.closeAll();
   }
 }
 
@@ -176,18 +173,15 @@ const serve = (scope: Scope): void => {
     stat: (path) => ask({ call: 'stat', path }),
   };
 
-  let server: FilesSshServer | undefined;
-  const transports = new Map<number, LinkTransport>();
+  const sessions = new Map<number, LinkSession>();
   const linked = (link: MessagePort): void => {
     const send = (message: Link, transfer: Transferable[] = []) => link.postMessage(message, transfer);
     link.onmessage = ({ data }: MessageEvent<Link>) => {
       if (data.op === 'open') {
-        const transport = new LinkTransport(data.id, send, () => transports.delete(data.id), data.remoteAddress, data.remotePort);
-        transports.set(data.id, transport);
-        void server?.serve(transport).catch((error) => log(`ems-files: a connection: ${error instanceof Error ? error.message : error}`));
+        sessions.set(data.id, new LinkSession(data.id, send, nodes, log, () => sessions.delete(data.id)));
         return;
       }
-      transports.get(data.id)?.take(data);
+      sessions.get(data.id)?.take(data);
     };
   };
 
@@ -195,11 +189,6 @@ const serve = (scope: Scope): void => {
     switch (data.op) {
       case 'start':
         await changeNames(data.names);
-        try {
-          server = new FilesSshServer({ hostKey: data.hostKey, clientKey: data.clientKey, nodes, log });
-        } catch (error) {
-          return post({ op: 'failed', message: error instanceof Error ? error.message : String(error) });
-        }
         linked(data.link);
         return post({ op: 'started' });
       case 'names':
@@ -213,7 +202,8 @@ const serve = (scope: Scope): void => {
         return;
       }
       case 'stop':
-        await server?.stop();
+        // The sessions close their node handles through EiN's thread while they stop.
+        await Promise.all([...sessions.values()].map((session) => session.end()));
         return post({ op: 'stopped' });
     }
   };

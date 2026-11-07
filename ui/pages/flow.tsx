@@ -63,7 +63,7 @@ export default function FlowPanel() {
   const families = new Set(holdings.map((holding) => holding.family));
 
   return (
-    <Group gap='sm' wrap='nowrap' align='flex-start'>
+    <Group gap='xs' wrap='nowrap' align='flex-start'>
       <FlowColumn
         title='At the media service'
         count={status.requests.length}

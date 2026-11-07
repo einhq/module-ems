@@ -45,7 +45,7 @@ export function ModelShelf({ status }: { status: Running }) {
         <Title order={5}>Models</Title>
         <Text size='sm' c='dimmed' ml='auto'>{loaded} of {status.families.length} loaded</Text>
       </Group>
-      <SimpleGrid cols={{ base: 1, xs: 2, md: 4 }} spacing='sm'>
+      <SimpleGrid cols={{ base: 1, xs: 2, md: 4 }} spacing='sm' style={{ alignItems: 'start' }}>
         {SHELVES.map(({ shelf, title, empty }) => {
           const families = shelved.get(shelf)!.sort();
           return (

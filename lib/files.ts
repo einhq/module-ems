@@ -12,8 +12,8 @@
  * The state hangs off `globalThis` rather than this file: a module's files are loaded once per
  * process per content, so a daemon started before a module update and a bin loaded after it run
  * different copies of this file, and must still share one set of names. A thread of its own has
- * a state of its own: the endpoint's worker keeps a copy of the names, which each change reaches
- * through `mirrors` before the change is done.
+ * a state of its own: each of the endpoint's session threads keeps a copy of the names, which each
+ * change reaches through `mirrors` before the change is done.
  */
 
 import type { Command } from '@ein/client';
@@ -35,8 +35,8 @@ export type FilesEndpoint = {
   /** The media service the names are for: the system's own (`CFG_EMS_URL` of the service). */
   emsUrl: string;
   user: string;
-  /** The password of `user`, made when the service starts and good until it stops. */
-  secret: string;
+  /** The private key `user` signs in with, in OpenSSH's format, made when the service starts and good until it stops. */
+  key: string;
   /** The host key's public half, `ssh-ed25519 AAAA…`, which EMS pins. */
   hostKey: string;
 };
@@ -88,8 +88,8 @@ export const lookup = (path: string): Named | 'directory' | undefined => {
 
 const hex = (bytes: number): string => Array.from(crypto.getRandomValues(new Uint8Array(bytes)), (b) => b.toString(16).padStart(2, '0')).join('');
 
-/** `EMS-Files`'s value: `address=…; user=…; secret=…; hostkey=…`. */
-export const headerValue = (endpoint: FilesEndpoint): string => `address=${endpoint.address}; user=${endpoint.user}; secret=${endpoint.secret}; hostkey=${endpoint.hostKey}`;
+/** `EMS-Files`'s value: `address=…; user=…; key=…; hostkey=…`, the key's file in base64. */
+export const headerValue = (endpoint: FilesEndpoint): string => `address=${endpoint.address}; user=${endpoint.user}; key=${btoa(endpoint.key)}; hostkey=${endpoint.hostKey}`;
 
 /**
  * Names for `paths` in a directory of their own, until `release` is called: each a VFS path, or a

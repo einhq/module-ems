@@ -1,74 +1,82 @@
 /**
- * The SSH server behind `ems-files`: one user, SFTP alone, chacha20-poly1305 alone. It runs on the
- * thread of its own that files-server.ts starts, and looks names up in that thread's copy of them.
+ * The SSH server behind `ems-files`: one user, SFTP alone, chacha20-poly1305 alone. Each session
+ * thread (files-thread.ts) runs one, which serves the connections the listening thread hands it
+ * and looks names up in that thread's copy of them.
  *
- * Its host key and the user's password are made when it starts and kept in memory only. Both
- * reach EMS in the `EMS-Files` header of each request (files.ts), so nothing is configured on
- * either side but the address, and a restart leaves no credential behind that still works. A
- * session that asks for a shell, a command or a forwarding is refused.
+ * The host key and the client's key are made when the service starts and kept in memory only.
+ * The host key's public half and the client's private key reach EMS in the `EMS-Files` header of
+ * each request (files.ts), so nothing is configured on either side but the address, and a restart
+ * leaves no credential behind that still works. A session that asks for a shell, a command or a
+ * forwarding is refused.
  */
 
-import { type Connection, generateKeyPair, Server, type ServerAuthContext, SFTP } from 'ssh2';
+import { type adapters, type Connection, generateKeyPair, parseKey, type PKAuthContext, Server, type ServerAuthContext, SFTP } from 'ssh2';
 import { FilesSession, type NodeAccess } from './files-sftp.ts';
+
+type Transport = adapters.Transport;
 
 export const FILES_USER = 'ems';
 
 /** The one cipher offered: AEAD, and the cheapest of EiN's SSH stack per byte. */
 const CIPHER = 'chacha20-poly1305@openssh.com';
 
+/** The keys of one run of the service: each a private key in OpenSSH's format and its public half, `ssh-ed25519 AAAA…`. */
+export type FilesKeys = { host: { private: string; public: string }; client: { private: string; public: string } };
+
+export const makeKeys = async (): Promise<FilesKeys> => ({ host: await generateKeyPair('ed25519'), client: await generateKeyPair('ed25519') });
+
 type FilesSshOptions = {
-  /** The port to listen on, 0 for any. */
-  port: number;
+  /** The host key, private. */
+  hostKey: string;
+  /** The public half of the one key a client signs in with. */
+  clientKey: string;
   /** The VFS, for the names of nodes with no file on disk. */
   nodes: NodeAccess;
   log?: (line: string) => void;
 };
 
-/** What a client needs to reach a server that listens: its port, the user's password, the host key. */
-type FilesListening = { port: number; secret: string; hostKey: string };
-
-const hex = (bytes: Uint8Array): string => Array.from(bytes, (b) => b.toString(16).padStart(2, '0')).join('');
-
-/** Whether a password is the secret, in a time that does not depend on where they differ. */
-const sameSecret = (a: string, b: string): boolean => {
-  if (a.length !== b.length) return false;
-  let diff = 0;
-  for (let i = 0; i < a.length; i++) diff |= a.charCodeAt(i) ^ b.charCodeAt(i);
-  return diff === 0;
-};
-
 export class FilesSshServer {
-  private server?: Server;
+  private server: Server;
+  private clientKey;
   private sessions = new Set<FilesSession>();
+  private transports = new Set<Transport>();
 
-  constructor(private options: FilesSshOptions) {}
-
-  async start(): Promise<FilesListening> {
-    const keys = await generateKeyPair('ed25519');
-    const secret = hex(crypto.getRandomValues(new Uint8Array(32)));
+  constructor(private options: FilesSshOptions) {
+    const clientKey = parseKey(options.clientKey);
+    if (clientKey instanceof Error) throw clientKey;
+    this.clientKey = clientKey;
     this.server = new Server(
       {
-        hostKeys: [keys.private],
+        hostKeys: [options.hostKey],
         algorithms: { cipher: [CIPHER], serverHostKey: ['ssh-ed25519'], compress: ['none'] },
       },
-      (client: Connection) => this.connection(client, secret),
+      (client: Connection) => this.connection(client),
     );
-    await this.server.listen(this.options.port, '0.0.0.0');
-    return { port: this.server.address()?.port ?? this.options.port, secret, hostKey: keys.public };
+  }
+
+  /** Serve one connection, until either side ends it. */
+  async serve(transport: Transport): Promise<void> {
+    this.transports.add(transport);
+    await this.server.injectTransport(transport);
   }
 
   async stop(): Promise<void> {
-    this.server?.close();
-    this.server = undefined;
+    for (const transport of this.transports) transport.close();
+    this.transports.clear();
     await Promise.all([...this.sessions].map((session) => session.closeAll()));
   }
 
-  private connection(client: Connection, secret: string): void {
+  private connection(client: Connection): void {
     const log = this.options.log ?? (() => {});
-    client.on('authentication', (ctx: ServerAuthContext) => {
-      const password = ctx.method === 'password' ? (ctx as ServerAuthContext & { password: string }).password : '';
-      if (ctx.method === 'password' && ctx.username === FILES_USER && sameSecret(password, secret)) return ctx.accept();
-      ctx.reject(['password']);
+    client.on('authentication', async (ctx: ServerAuthContext) => {
+      if (ctx.method === 'publickey' && ctx.username === FILES_USER) {
+        const pk = ctx as PKAuthContext;
+        // Without a signature the client only asks whether this key would do; the signed request follows.
+        if (this.clientKey.equals(pk.key.data) && (!pk.signature || await this.clientKey.verify(pk.blob!, pk.signature, pk.hashAlgo) === true)) {
+          return ctx.accept();
+        }
+      }
+      ctx.reject(['publickey']);
     });
     client.on('ready', () => {
       client.on('session', (accept) => {
@@ -89,6 +97,9 @@ export class FilesSshServer {
           });
         });
       });
+    });
+    client.on('close', () => {
+      for (const transport of this.transports) if (transport.closed) this.transports.delete(transport);
     });
     client.on('error', (error: Error) => log(`ems-files: connection error: ${error.message}`));
   }

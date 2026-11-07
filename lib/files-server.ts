@@ -1,18 +1,25 @@
 /**
- * `ems-files`'s server, as EiN's thread runs it: the SSH server itself runs on a worker
- * (files-thread.ts), so the media service's reads and writes never wait for EiN's event loop.
+ * `ems-files`'s server, as EiN's thread runs it: a thread listens and carries each connection's
+ * bytes (files-listen.ts), and up to `SESSION_THREADS` threads serve them (files-thread.ts), so the
+ * media service's reads and writes never wait for EiN's event loop, and several connections are
+ * served on several CPUs.
  *
- * This side publishes the endpoint, keeps the worker's copy of the names (every grant waits until
- * the worker has it), and answers the worker's calls on nodes with no file on disk through the
- * VFS. A worker that dies settles `failed`, and nothing is served from then on.
+ * This side makes the keys, publishes the endpoint, starts a session thread whenever the listening
+ * thread asks for one, keeps each session thread's copy of the names (every grant waits until all
+ * have it), and answers their calls on nodes with no file on disk through the VFS. A thread that
+ * dies settles `failed`, and nothing is served from then on.
  */
 
-import { FILES_USER } from './files-ssh.ts';
+import { FILES_USER, type FilesKeys, makeKeys } from './files-ssh.ts';
 import type { NodeAccess, NodeHandle } from './files-sftp.ts';
 import { type FilesEndpoint, filesState, type NamesMirror } from './files.ts';
+import { type FromListen, LISTEN_URL, type ToListen } from './files-listen.ts';
 import { type FromThread, type NodeCall, THREAD_URL, type ToThread } from './files-thread.ts';
 
 export { FILES_USER };
+
+/** The most threads that serve connections; the media service mounts with as many connections. */
+const SESSION_THREADS = 4;
 
 type FilesServerOptions = {
   /** The port to listen on, 0 for any. */
@@ -26,37 +33,36 @@ type FilesServerOptions = {
   log?: (line: string) => void;
 };
 
-export class FilesServer {
-  private worker?: Worker;
-  private endpoint?: FilesEndpoint;
-  private mirror?: NamesMirror;
-  private listening?: PromiseWithResolvers<{ port: number; secret: string; hostKey: string }>;
-  private stopped?: PromiseWithResolvers<void>;
+/** What a worker's events throw would end EiN's process, not this service: it is logged. */
+const guarded = (log: ((line: string) => void) | undefined, run: () => void): void => {
+  try {
+    run();
+  } catch (error) {
+    log?.(`ems-files: ${error instanceof Error ? error.message : error}`);
+  }
+};
+
+/** A session thread: its copy of the names, and the node handles its calls opened. */
+class SessionThread {
+  private worker: Worker;
+  private mirror: NamesMirror;
   private acks = new Map<number, () => void>();
   private nextAck = 1;
   private handles = new Map<number, NodeHandle>();
   private nextHandle = 1;
-  private failure = Promise.withResolvers<Error>();
+  private started = Promise.withResolvers<void>();
+  private stopped = Promise.withResolvers<void>();
 
-  /** Settles when the worker ends without being stopped, with why. */
-  readonly failed: Promise<Error> = this.failure.promise;
-
-  constructor(private options: FilesServerOptions) {}
-
-  /** Start the worker, listen, and publish the endpoint to the client; the port actually listened on. */
-  async start(): Promise<number> {
-    const worker = new Worker(THREAD_URL, { type: 'module' });
-    this.worker = worker;
-    this.listening = Promise.withResolvers();
-    // What the worker's events throw would end EiN's process, not this service: it is logged.
-    worker.onmessage = ({ data }: MessageEvent<FromThread>) => this.guard(() => this.message(data));
-    worker.onerror = (event: ErrorEvent) => {
+  constructor(keys: FilesKeys, link: MessagePort, private options: FilesServerOptions, private fail: (error: Error) => void) {
+    this.worker = new Worker(THREAD_URL, { type: 'module' });
+    this.worker.onmessage = ({ data }: MessageEvent<FromThread>) => guarded(options.log, () => this.message(data));
+    this.worker.onerror = (event: ErrorEvent) => {
       event.preventDefault();
-      this.guard(() => this.fail(new Error(`ems-files thread: ${event.message}`)));
+      guarded(options.log, () => fail(new Error(`ems-files thread: ${event.message}`)));
     };
     const { names, grants, mirrors } = filesState();
     // The copy starts with the names granted so far; the changes after follow it in order.
-    this.post({ op: 'start', port: this.options.port, names: { set: [...names], grants: [...grants] } });
+    this.post({ op: 'start', hostKey: keys.host.private, clientKey: keys.client.public, names: { set: [...names], grants: [...grants] }, link }, [link]);
     this.mirror = (change) => {
       const seq = this.nextAck++;
       const { promise, resolve } = Promise.withResolvers<void>();
@@ -65,38 +71,41 @@ export class FilesServer {
       return promise;
     };
     mirrors.add(this.mirror);
-    const { port, secret, hostKey } = await this.listening.promise;
-    this.endpoint = { address: this.options.address, emsUrl: this.options.emsUrl, user: FILES_USER, secret, hostKey };
-    filesState().endpoints.set(this.options.emsUrl, this.endpoint);
-    return port;
   }
 
-  async stop(): Promise<void> {
-    if (!this.worker) return;
-    this.unpublish();
-    this.stopped = Promise.withResolvers();
+  /** Settles once the thread serves, rejects when it cannot. */
+  get ready(): Promise<void> {
+    return this.started.promise;
+  }
+
+  /** Ask the thread to stop, which closes its sessions and their node handles through this one. */
+  stop(): Promise<void> {
+    filesState().mirrors.delete(this.mirror);
     this.post({ op: 'stop' });
-    // The sessions close their node handles through this thread while they stop.
-    await Promise.race([this.stopped.promise, this.failed]);
-    this.end();
+    return this.stopped.promise;
   }
 
-  private guard(run: () => void): void {
-    try {
-      run();
-    } catch (error) {
-      this.options.log?.(`ems-files: ${error instanceof Error ? error.message : error}`);
-    }
+  /** Let go of the thread and what it held: grants waiting on it go on, its node handles close. */
+  end(): void {
+    filesState().mirrors.delete(this.mirror);
+    this.worker.terminate();
+    for (const ack of this.acks.values()) ack();
+    this.acks.clear();
+    for (const handle of this.handles.values()) void handle.close().catch(() => {});
+    this.handles.clear();
+    this.started.reject(new Error('ems-files: stopped'));
+    this.started.promise.catch(() => {});
+    this.stopped.resolve();
   }
 
   private post(message: ToThread, transfer: Transferable[] = []): void {
-    this.worker?.postMessage(message, transfer);
+    this.worker.postMessage(message, transfer);
   }
 
   private message(data: FromThread): void {
     switch (data.op) {
-      case 'listening':
-        return this.listening?.resolve(data);
+      case 'started':
+        return this.started.resolve();
       case 'failed':
         return this.fail(new Error(data.message));
       case 'names':
@@ -108,7 +117,7 @@ export class FilesServer {
       case 'node':
         return void this.node(data.id, data);
       case 'stopped':
-        return this.stopped?.resolve();
+        return this.stopped.resolve();
     }
   }
 
@@ -123,12 +132,13 @@ export class FilesServer {
   }
 
   private async call(call: NodeCall): Promise<{ value: unknown; transfer?: Transferable[] }> {
+    const { nodes } = this.options;
     if (call.call === 'open') {
       const id = this.nextHandle++;
-      this.handles.set(id, await this.options.nodes.open(call.path, call.mode));
+      this.handles.set(id, await nodes.open(call.path, call.mode));
       return { value: id };
     }
-    if (call.call === 'stat') return { value: await this.options.nodes.stat(call.path) };
+    if (call.call === 'stat') return { value: await nodes.stat(call.path) };
     const handle = this.handles.get(call.handle);
     if (!handle) throw new Error('ems-files: no such node handle');
     switch (call.call) {
@@ -149,25 +159,95 @@ export class FilesServer {
         return { value: undefined };
     }
   }
+}
 
-  private unpublish(): void {
-    const { endpoints, mirrors } = filesState();
-    if (this.endpoint && endpoints.get(this.options.emsUrl) === this.endpoint) endpoints.delete(this.options.emsUrl);
-    if (this.mirror) mirrors.delete(this.mirror);
+export class FilesServer {
+  private listener?: Worker;
+  private sessions: SessionThread[] = [];
+  private keys?: FilesKeys;
+  private endpoint?: FilesEndpoint;
+  private listening?: PromiseWithResolvers<number>;
+  private stopped?: PromiseWithResolvers<void>;
+  private failure = Promise.withResolvers<Error>();
+
+  /** Settles when a thread ends without being stopped, with why. */
+  readonly failed: Promise<Error> = this.failure.promise;
+
+  constructor(private options: FilesServerOptions) {}
+
+  /** Start the threads, listen, and publish the endpoint to the client; the port actually listened on. */
+  async start(): Promise<number> {
+    const keys = this.keys = await makeKeys();
+    const listener = new Worker(LISTEN_URL, { type: 'module' });
+    this.listener = listener;
+    this.listening = Promise.withResolvers();
+    listener.onmessage = ({ data }: MessageEvent<FromListen>) => guarded(this.options.log, () => this.message(data));
+    listener.onerror = (event: ErrorEvent) => {
+      event.preventDefault();
+      guarded(this.options.log, () => this.fail(new Error(`ems-files listening thread: ${event.message}`)));
+    };
+    this.post({ op: 'start', port: this.options.port, sessions: SESSION_THREADS });
+    // The first session thread starts with the listener, so the first connection does not wait for one.
+    this.more();
+    const port = await this.listening.promise;
+    this.endpoint = { address: this.options.address, emsUrl: this.options.emsUrl, user: FILES_USER, key: keys.client.private, hostKey: keys.host.public };
+    filesState().endpoints.set(this.options.emsUrl, this.endpoint);
+    return port;
   }
 
-  /** Stop the worker and let go of what it held: grants waiting on it go on, its node handles close. */
+  async stop(): Promise<void> {
+    if (!this.listener) return;
+    this.unpublish();
+    this.stopped = Promise.withResolvers();
+    this.post({ op: 'stop' });
+    await Promise.race([this.stopped.promise, this.failed]);
+    // The sessions close their node handles through this thread while they stop.
+    await Promise.race([Promise.all(this.sessions.map((session) => session.stop())), this.failed]);
+    this.end();
+  }
+
+  private post(message: ToListen, transfer: Transferable[] = []): void {
+    this.listener?.postMessage(message, transfer);
+  }
+
+  /** Start a session thread, and hand it to the listening thread once it serves. */
+  private more(): void {
+    if (!this.keys || this.sessions.length >= SESSION_THREADS) return;
+    const { port1, port2 } = new MessageChannel();
+    const session = new SessionThread(this.keys, port1, this.options, (error) => this.fail(error));
+    this.sessions.push(session);
+    session.ready.then(() => this.post({ op: 'session', link: port2 }, [port2]), () => {});
+  }
+
+  private message(data: FromListen): void {
+    switch (data.op) {
+      case 'listening':
+        return this.listening?.resolve(data.port);
+      case 'failed':
+        return this.fail(new Error(data.message));
+      case 'more':
+        return this.more();
+      case 'log':
+        return this.options.log?.(data.line);
+      case 'stopped':
+        return this.stopped?.resolve();
+    }
+  }
+
+  private unpublish(): void {
+    const { endpoints } = filesState();
+    if (this.endpoint && endpoints.get(this.options.emsUrl) === this.endpoint) endpoints.delete(this.options.emsUrl);
+  }
+
   private end(): void {
-    this.worker?.terminate();
-    this.worker = undefined;
-    for (const ack of this.acks.values()) ack();
-    this.acks.clear();
-    for (const handle of this.handles.values()) void handle.close().catch(() => {});
-    this.handles.clear();
+    this.listener?.terminate();
+    this.listener = undefined;
+    for (const session of this.sessions) session.end();
+    this.sessions = [];
   }
 
   private fail(error: Error): void {
-    if (!this.worker) return;
+    if (!this.listener) return;
     this.unpublish();
     this.end();
     this.listening?.reject(error);

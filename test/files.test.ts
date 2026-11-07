@@ -1,8 +1,8 @@
 /**
  * ems-files: the names a request's files get, and an SFTP session that reaches exactly those.
  *
- * Fast tier: a real server on loopback over a temp directory, on its worker thread, reached with
- * ssh2's client the way EMS reaches it — one user, the secret from the header, chacha20-poly1305.
+ * Fast tier: a real server on loopback over a temp directory, on its threads, reached with ssh2's
+ * client the way EMS reaches it — one user, the key from the header, chacha20-poly1305.
  * A node with no file on disk is played by an in-memory handle on the test's thread.
  */
 
@@ -10,6 +10,7 @@ import { assert, assertEquals, assertRejects } from '@std/assert';
 import type { ResourceHandleIf } from '@ein/client';
 import { Client, type SFTP, STATUS_CODE } from 'ssh2';
 import { FILES_USER, FilesServer } from '../lib/files-server.ts';
+import { makeKeys } from '../lib/files-ssh.ts';
 import { filesState, forRequest, grant, lookup } from '../lib/files.ts';
 
 const EMS_URL = 'http://ems.test:8181';
@@ -79,7 +80,7 @@ Deno.test('names kept in a state an earlier copy of files.ts made, which lacks w
 });
 
 Deno.test('forRequest: every file and output at any depth goes by its name', async () => {
-  filesState().endpoints.set(EMS_URL, { address: 'ein.test:2224', emsUrl: EMS_URL, user: FILES_USER, secret: 's', hostKey: 'ssh-ed25519 AAAA' });
+  filesState().endpoints.set(EMS_URL, { address: 'ein.test:2224', emsUrl: EMS_URL, user: FILES_USER, key: 'k', hostKey: 'ssh-ed25519 AAAA' });
   try {
     const cmd = vfsOf({ '/archive/a/clip.mp4': '/files/02/02EXAMPLE', '/archive/a/clip.mp4/thumbnails/.tmp-1.avif': '/files-volatile/03/03EXAMPLE' });
     const sent = (await forRequest(cmd, EMS_URL, {
@@ -92,7 +93,7 @@ Deno.test('forRequest: every file and output at any depth goes by its name', asy
     assert(body.targets[0].output.path.endsWith('/1-.tmp-1.avif') && body.targets[0].output.format === 'avif');
     assertEquals(lookup(body.file.path), { mode: 'read', disk: '/files/02/02EXAMPLE' });
     assertEquals(lookup(body.targets[0].output.path), { mode: 'write', disk: '/files-volatile/03/03EXAMPLE' });
-    assert(sent.headers['ems-files'].startsWith('address=ein.test:2224; user=ems; secret=s; hostkey=ssh-ed25519 '));
+    assert(sent.headers['ems-files'].startsWith(`address=ein.test:2224; user=ems; key=${btoa('k')}; hostkey=ssh-ed25519 `));
     await sent.release();
     assertEquals(lookup(body.file.path), undefined);
   } finally {
@@ -109,8 +110,8 @@ Deno.test('forRequest: a body that names no file goes as it is; one that does ne
   assertEquals(filesState().names.size, 0);
 });
 
-/** Connect as EMS does: the user and secret from the header, the host key pinned, one cipher. */
-const connect = async (port: number, password: string, hostKey: string, cipher = 'chacha20-poly1305@openssh.com'): Promise<{ client: Client; sftp: SFTP }> => {
+/** Connect as EMS does: the user and key from the header, the host key pinned, one cipher. */
+const connect = async (port: number, privateKey: string, hostKey: string, cipher = 'chacha20-poly1305@openssh.com'): Promise<{ client: Client; sftp: SFTP }> => {
   const client = new Client();
   const pinned = hostKey.split(' ')[1];
   const ready = new Promise<void>((resolve, reject) => {
@@ -123,7 +124,7 @@ const connect = async (port: number, password: string, hostKey: string, cipher =
         host: '127.0.0.1',
         port,
         username: FILES_USER,
-        password,
+        privateKey,
         algorithms: { cipher: [cipher], serverHostKey: ['ssh-ed25519'] },
         hostVerifier: (key) => (typeof key === 'string' ? key : btoa(String.fromCharCode(...key))) === pinned,
       }),
@@ -173,7 +174,8 @@ Deno.test({
     const [input, node, gone, output] = [body.file.path, body.second.file.path, body.third.file.path, body.targets[0].output.path];
     const directory = input.slice(0, input.lastIndexOf('/'));
     const named = header(request.headers['ems-files']);
-    const { client, sftp } = await connect(port, named.secret, named.hostkey);
+    const key = atob(named.key);
+    const { client, sftp } = await connect(port, key, named.hostkey);
 
     try {
       await t.step('the header names the endpoint, its user and its host key', () => {
@@ -235,6 +237,24 @@ Deno.test({
         }
       });
 
+      await t.step('several connections at once, on session threads of their own, each reach a name granted after they connected', async () => {
+        const block = crypto.getRandomValues(new Uint8Array(64 * 1024));
+        const large = new Uint8Array(8 * 1024 * 1024);
+        for (let at = 0; at < large.length; at += block.length) large.set(block, at);
+        large[large.length - 1] ^= 0xff;
+        await Deno.writeFile(`${root}/large.bin`, large);
+        const others = await Promise.all([1, 2, 3, 4, 5].map(() => connect(port, key, named.hostkey)));
+        const { names, release } = await grant(vfsOf({}), [{ path: `${root}/large.bin`, mode: 'read' }]);
+        try {
+          const read = await Promise.all([{ client, sftp }, ...others].map(({ sftp }) => sftp.readFile(names[0])));
+          for (const bytes of read) assertEquals(new Uint8Array(bytes), large);
+          for (const { sftp } of others) assertEquals(new TextDecoder().decode(await sftp.readFile(node)), 'db-tier bytes');
+        } finally {
+          await release();
+          for (const other of others) other.client.end();
+        }
+      });
+
       await t.step('the names end with their request', async () => {
         await request.release();
         await assertRejects(() => sftp.readFile(input));
@@ -242,9 +262,10 @@ Deno.test({
         await assertRejects(() => sftp.writeFile(output, new TextEncoder().encode('late')));
       });
 
-      await t.step('a wrong password and another cipher are refused', async () => {
-        await assertRejects(() => connect(port, 'not-the-secret', named.hostkey));
-        await assertRejects(() => connect(port, named.secret, named.hostkey, 'aes128-gcm@openssh.com'));
+      await t.step('another key and another cipher are refused', async () => {
+        const other = (await makeKeys()).client.private;
+        await assertRejects(() => connect(port, other, named.hostkey));
+        await assertRejects(() => connect(port, key, named.hostkey, 'aes128-gcm@openssh.com'));
       });
     } finally {
       await request.release();

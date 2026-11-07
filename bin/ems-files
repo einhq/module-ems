@@ -7,8 +7,8 @@
  * system's own EMS that names a file names this endpoint, as `CFG_EMS_FILES_ADDRESS` says EMS
  * reaches it, in its `EMS-Files` header: EMS reads the request's inputs and writes back its outputs
  * here, and nothing else, for as long as the request runs. With the address empty it serves
- * nothing, and those requests wait. It serves from a thread of its own, so pipelines keeping EiN
- * busy do not slow the media service's reads.
+ * nothing, and those requests wait. It serves from threads of its own, several connections on
+ * several, so pipelines keeping EiN busy do not slow the media service's reads.
  */
 
 import type { CmdReturn, Command } from '@ein/client';

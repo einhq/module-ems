@@ -1,0 +1,40 @@
+#!ts
+/**
+ * ems-models-sample — what the media service holds now, as one sample of the `ems-models` series,
+ * which the `gpu-sampler` service appends each minute: the card mode, every model copy and where it
+ * is, the families a request is using, and EiN's work not started and in line beside it. `ems-models` reads the series back for the Media
+ * service tab's strip. `null` when the media service is not answering, and then nothing is written.
+ */
+
+import type { CmdReturn, Command } from '@ein/client';
+import { readTail, seriesPath, TRIGGER_POOL } from '@ein/client';
+import { health } from '@ems/client';
+import { modelsSample, type PoolsReading, workWaiting } from '@ems/models';
+import { statusFromHealth } from '@ems/status';
+
+const emsModelsSample = async (cmd: Command): CmdReturn => {
+  const answer = await health(cmd);
+  // EiN's work beside it, from core's newest pools reading; none before the sampler has one.
+  const [pools] = answer ? await readTail<PoolsReading>(cmd.sys.vfs, cmd.access, seriesPath('pools'), 1).catch(() => []) : [];
+  const sample = answer
+    ? modelsSample(statusFromHealth(answer, cmd.env.CFG_EMS_URL || 'http://127.0.0.1:8181'), pools ? workWaiting(pools.value, TRIGGER_POOL) : undefined)
+    : null;
+  if (cmd.json) await cmd.writeJSON(sample);
+  else if (!sample) await cmd.writeLn('the media service is not answering');
+  else {await cmd.writeLn(`${sample.mode} · ${
+      sample.copies.map((copy) => `${copy.family}:${copy.place}`).join(' ') || 'no models'
+    }${sample.working.length ? ` · working ${sample.working.join(' ')}` : ''}`);}
+  return 0;
+};
+
+emsModelsSample.spec = {
+  name: 'ems-models-sample',
+  effect: 'read' as const,
+  description: 'What the media service holds now: the card mode, each model copy and where it is, the models working',
+  args: [],
+  flags: [],
+  examples: ['ems-models-sample'],
+  returns: 'mode, copies (family, place, worker, state), working, notStarted and inLine, or null when the media service is not answering.',
+};
+
+export default emsModelsSample;

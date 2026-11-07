@@ -15,6 +15,7 @@
     "@ems/files": "./lib/files.ts",
     "@ems/files-server": "./lib/files-server.ts",
     "@ems/gpu": "./lib/gpu.ts",
+    "@ems/models": "./lib/models.ts",
     "@ems/status": "./lib/status.ts",
     "@ems/testing": "./test/stub-ems.ts",
     "@ems/text-embedding": "./lib/text-embedding.ts",

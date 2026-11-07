@@ -1,13 +1,19 @@
-import { Alert, Badge, Box, Card, ColorSwatch, Group, HoverCard, Loader, Progress, SimpleGrid, Skeleton, Stack, Table, Text, Title, Tooltip } from '@mantine/core';
-import type { EmsCaller, EmsCardMode, EmsFamily, EmsLane, EmsModelCopy, EmsModelSize, EmsPlacement, EmsRequest, EmsStatus, EmsWorkerMemory } from '@ems/api';
+import { Alert, Badge, Box, Button, Card, Collapse, Group, HoverCard, Loader, Progress, SimpleGrid, Skeleton, Stack, Table, Text, Title, Tooltip } from '@mantine/core';
+import type { EmsCaller, EmsCardMode, EmsFamily, EmsLane, EmsModelCopy, EmsModels, EmsModelSize, EmsPlacement, EmsRequest, EmsStatus, EmsWorkerMemory } from '@ems/api';
 import { StatTile, TablerIcon, utilizationColor } from '@ein/ui/components';
 import { formatUptime } from '@ein/ui/lib';
+import { useState } from 'react';
+import { MemoryMap } from './MemoryMap.tsx';
+import { ModelShelf } from './ModelShelf.tsx';
+import { ModelTimeline } from './ModelTimeline.tsx';
 
 type Props = {
   /** Absent until the first answer arrives. */
   status?: EmsStatus;
   /** `ems-status` exits non-zero when EMS is not answering, so that arrives as an error. */
   error?: Error | null;
+  /** `ems-models`: what it held over the last hours, for the strip; null until it is in. */
+  history?: EmsModels | null;
 };
 
 type Running = Extract<EmsStatus, { running: true }>;
@@ -82,7 +88,7 @@ function Fact({ label, value, tooltip }: { label: string; value: string; tooltip
  * here. A row's status is per copy, because a family can sit on the card and on the CPU at once
  * after the card filled.
  */
-export function MediaService({ status, error }: Props) {
+export function MediaService({ status, error, history }: Props) {
   if (!status && error) {
     return (
       <Alert color='red' variant='light' icon={<TablerIcon name='plug-connected-x' size={16} />} title='The media service is not answering'>
@@ -119,7 +125,9 @@ export function MediaService({ status, error }: Props) {
       ))}
       {(status.warnings ?? []).map((warning) => <Alert key={warning} color='yellow' variant='light' icon={<TablerIcon name='alert-triangle' size={16} />}>{warning}</Alert>)}
       <Memory status={status} />
-      <Models families={families} mode={status.card?.mode} />
+      <ModelShelf status={status} />
+      <ModelTimeline history={history} />
+      <ModelDetails families={families} mode={status.card?.mode} />
       <Requests requests={status.requests} queues={status.queues} callers={status.callers} families={families} />
     </Stack>
   );
@@ -257,76 +265,10 @@ function WorkerTile({ label, memory, tooltip }: { label: string; memory: EmsWork
  */
 function Memory({ status }: { status: Running }) {
   const gpu = status.gpu;
-  const processes = gpu?.processes ?? [];
-  const share = (worker: string) => processes.filter((p) => p.worker === worker).reduce((sum, p) => sum + p.usedMb, 0);
-  const batch = share('batch');
-  const query = share('query');
-  const card = share('card');
-  const otherEms = processes.filter((p) => !p.worker).reduce((sum, p) => sum + p.usedMb, 0);
-  const used = gpu?.memUsedMb;
-  const total = gpu?.memTotalMb;
-  const outside = used !== undefined && gpu?.processes ? Math.max(0, used - batch - query - card - otherEms) : undefined;
-  const free = used !== undefined && total ? Math.max(0, total - used) : undefined;
-  const pct = (mb: number) => (total ? (mb / total) * 100 : 0);
-
-  const segments = [
-    { label: 'EMS batch worker', mb: batch, color: 'teal', note: 'the indexing models on the GPU' },
-    { label: 'EMS query worker', mb: query, color: 'cyan', note: 'search models' },
-    { label: 'EMS card worker', mb: card, color: 'indigo', note: 'search models on the GPU, while no indexing work holds it' },
-    { label: 'other EMS processes', mb: otherEms, color: 'blue', note: 'transcodes and the like' },
-    { label: 'outside EMS', mb: outside ?? 0, color: 'grape', note: "other containers on the same card — in production, the chat assistant's language model" },
-  ].filter((segment) => segment.mb > 0);
-
   return (
-    <SimpleGrid cols={{ base: 1, md: 3 }} spacing='sm'>
-      <Card style={{ gridColumn: 'span 2' }}>
-        <Group gap='xs' mb='xs'>
-          <TablerIcon name='device-desktop-analytics' size={18} />
-          <Title order={5}>Graphics card memory</Title>
-          {used !== undefined && total && <Text size='sm' c='dimmed' ml='auto'>{megabytes(used)} of {megabytes(total)}</Text>}
-        </Group>
-        {used === undefined || !total ? <Text size='sm' c='dimmed'>{gpu?.present ? 'The card does not report its memory.' : 'No graphics card.'}</Text> : (
-          <Stack gap='xs'>
-            {gpu?.processes
-              ? (
-                <Progress.Root size={18}>
-                  {segments.map((segment) => (
-                    <Tooltip key={segment.label} label={`${segment.label}: ${megabytes(segment.mb)}`} withArrow>
-                      <Progress.Section value={pct(segment.mb)} color={segment.color} />
-                    </Tooltip>
-                  ))}
-                </Progress.Root>
-              )
-              : <Progress value={pct(used)} size={18} color={utilizationColor(pct(used))} />}
-            <Group gap='lg' wrap='wrap'>
-              {segments.map((segment) => (
-                <Tooltip key={segment.label} label={segment.note} withArrow multiline maw={300}>
-                  <Group gap={6} wrap='nowrap'>
-                    <ColorSwatch size={10} color={`var(--mantine-color-${segment.color}-6)`} />
-                    <Text size='xs'>{segment.label}</Text>
-                    <Text size='xs' ff='monospace' c='dimmed'>{megabytes(segment.mb)}</Text>
-                  </Group>
-                </Tooltip>
-              ))}
-              {free !== undefined && (
-                <Group gap={6} wrap='nowrap'>
-                  <ColorSwatch size={10} color='var(--mantine-color-gray-3)' />
-                  <Text size='xs'>free</Text>
-                  <Text size='xs' ff='monospace' c='dimmed'>{megabytes(free)}</Text>
-                </Group>
-              )}
-            </Group>
-            {status.vramReservedMb !== undefined && (
-              <Text size='xs' c='dimmed'>
-                Of the batch worker's share, torch holds {megabytes(status.vramReservedMb)}
-                {status.vramAllocatedMb !== undefined && ` (${megabytes(status.vramAllocatedMb)} in live tensors)`}. The rest is the CUDA context and the face models'
-                onnxruntime memory, which torch does not count.
-              </Text>
-            )}
-          </Stack>
-        )}
-      </Card>
-      <SimpleGrid cols={2} spacing='sm'>
+    <Stack gap='sm'>
+      <MemoryMap status={status} />
+      <SimpleGrid cols={{ base: 1, sm: 3 }} spacing='sm'>
         {gpu?.utilPct !== undefined && (
           <StatTile
             label='GPU load'
@@ -356,7 +298,7 @@ function Memory({ status }: { status: Running }) {
           />
         )}
       </SimpleGrid>
-    </SimpleGrid>
+    </Stack>
   );
 }
 
@@ -424,6 +366,27 @@ function Size({ size, last }: { size?: EmsModelSize; last?: boolean }) {
     <Tooltip label={label} withArrow multiline maw={300}>
       <Text size='xs' ff='monospace' c={last ? 'dimmed' : undefined}>{parts.join(' · ') || '< 1 MB'}</Text>
     </Tooltip>
+  );
+}
+
+/** The per-family table, folded under the shelf: placement in each card mode, sizes, when each was used. */
+function ModelDetails({ families, mode }: { families: EmsFamily[]; mode?: EmsCardMode }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <Stack gap='xs'>
+      <Button
+        variant='subtle'
+        size='xs'
+        w='fit-content'
+        leftSection={<TablerIcon name={open ? 'chevron-down' : 'chevron-right'} size={14} />}
+        onClick={() => setOpen((value) => !value)}
+      >
+        {open ? 'Hide the models in detail' : 'Every model in detail: where it runs in each mode, its size, when it was last used'}
+      </Button>
+      <Collapse expanded={open}>
+        <Models families={families} mode={mode} />
+      </Collapse>
+    </Stack>
   );
 }
 

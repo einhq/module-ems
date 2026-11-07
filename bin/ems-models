@@ -1,0 +1,54 @@
+#!ts
+/**
+ * ems-models — what the media service held over the last hours, a sample a minute, with the work
+ * EiN had waiting at the same times: the Media service tab's strip, where a model loaded again and
+ * again shows as a row that flickers.
+ *
+ * Read back from the `ems-models` series the `gpu-sampler` service keeps (`ems-models-sample`).
+ */
+
+import type { CmdReturn, Command } from '@ein/client';
+import { collectUnknownFlags, parseArgs, readTail, reportUnknownFlags, seriesPath } from '@ein/client';
+import type { EmsModels, EmsModelsSample } from '@ems/api';
+
+const HOUR = 60 * 60 * 1000;
+const DEFAULT_HOURS = 6;
+
+const emsModels = async (cmd: Command): CmdReturn => {
+  const unknown: string[] = [];
+  const flags = parseArgs(cmd.args, { string: ['hours'], unknown: collectUnknownFlags(unknown) });
+  if (await reportUnknownFlags(cmd, unknown)) return 1;
+  const hours = Math.min(24, Math.max(1, Number(flags.hours ?? DEFAULT_HOURS) || DEFAULT_HOURS));
+  const windowMs = hours * HOUR;
+  const since = Date.now() - windowMs;
+  // A sample a minute, and room for a stretch written denser (a restart of the sampler).
+  const samples = (await readTail<EmsModelsSample>(cmd.sys.vfs, cmd.access, seriesPath('ems-models'), Math.ceil(hours * 60 * 1.5) + 2))
+    .filter((sample) => sample.at >= since);
+
+  const answer: EmsModels = { windowMs, samples };
+  if (cmd.json) {
+    await cmd.writeJSON(answer satisfies EmsModels);
+    return 0;
+  }
+  if (samples.length === 0) {
+    await cmd.writeLn(`no sample of what the media service held in the last ${hours} h`);
+    return 0;
+  }
+  for (const { at, value } of samples.slice(-10)) {
+    const work = value.inLine !== undefined ? `  in line ${value.inLine}, not started ${value.notStarted ?? 0}` : '';
+    await cmd.writeLn(`${new Date(at).toISOString().slice(11, 16)}  ${value.mode.padEnd(8)} ${value.copies.map((copy) => `${copy.family}:${copy.place}`).join(' ')}${work}`);
+  }
+  return 0;
+};
+
+emsModels.spec = {
+  name: 'ems-models',
+  effect: 'read' as const,
+  description: 'What the media service held over the last hours, a sample a minute, with the work EiN had waiting beside it',
+  args: [],
+  flags: [{ name: 'hours', type: 'string' as const, description: `Hours of history, 1 to 24 (default ${DEFAULT_HOURS})` }],
+  examples: ['ems-models', 'ems-models --hours 24'],
+  returns: 'windowMs and samples: at, and mode, copies, working, notStarted and inLine.',
+};
+
+export default emsModels;

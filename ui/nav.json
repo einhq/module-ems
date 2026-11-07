@@ -8,6 +8,13 @@
       "route": "/system/gpu"
     },
     {
+      "id": "ems.flow",
+      "slot": "system.flow",
+      "label": "Media service",
+      "icon": "cpu",
+      "route": "/system/flow"
+    },
+    {
       "id": "ems.media-service",
       "slot": "system.tabs",
       "label": "Media service",

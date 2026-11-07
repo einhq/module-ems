@@ -170,3 +170,24 @@ export type GpuPoint = { at: number; value: number };
  * `gpu-sampler` service keeps. Null when there is no reading: no media service, or no card.
  */
 export type EmsGpu = (GpuSample & { vramPercent?: number; utilSeries: GpuPoint[]; vramSeries: GpuPoint[] }) | null;
+
+/**
+ * What the media service held at one moment, as `ems-models-sample` answers and the `ems-models`
+ * series stores it, a minute apart: the card mode, each model copy and where it was, the families a
+ * request was using, and EiN's own work beside it from core's newest `pools` reading — not made
+ * yet (`notStarted`) and in line for a worker (`inLine`).
+ */
+export type EmsModelsSample = {
+  mode: EmsCardMode;
+  copies: { family: string; place: 'card' | 'ram'; worker?: string; state: EmsCopyState }[];
+  working: string[];
+  notStarted?: number;
+  inLine?: number;
+};
+
+/**
+ * `ems-models`: the last hours of what the media service held, a sample a minute (epoch ms) — what
+ * the Media service tab's strip draws, where a model loaded again and again shows as a row that
+ * flickers.
+ */
+export type EmsModels = { windowMs: number; samples: { at: number; value: EmsModelsSample }[] };

@@ -1,5 +1,5 @@
 import { usePolledCommand } from '@ein/ui/hooks';
-import type { EmsStatus } from '@ems/api';
+import type { EmsModels, EmsStatus } from '@ems/api';
 import { MediaService } from '../components/MediaService.tsx';
 
 /**
@@ -9,5 +9,6 @@ import { MediaService } from '../components/MediaService.tsx';
  */
 export default function MediaServicePage() {
   const { data, error } = usePolledCommand<EmsStatus>('ems-status');
-  return <MediaService status={data ?? undefined} error={error} />;
+  const { data: history } = usePolledCommand<EmsModels>('ems-models');
+  return <MediaService status={data ?? undefined} error={error} history={history} />;
 }

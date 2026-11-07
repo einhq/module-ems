@@ -179,7 +179,7 @@ export type EmsGpu = (GpuSample & { vramPercent?: number; utilSeries: GpuPoint[]
  * The memory of the machine the media service runs on, which need not be EiN's: its total and what
  * is available, and what EMS's own container holds of it (`usedMb`) and may (`limitMb`). MB.
  */
-export type EmsMemoryReading = { totalMb: number; availableMb?: number; usedMb?: number; limitMb?: number };
+type EmsMemoryReading = { totalMb: number; availableMb?: number; usedMb?: number; limitMb?: number };
 
 /**
  * `ems-memory`: the media service's machine's memory now and over the last six hours, for the

@@ -62,8 +62,9 @@ export default function FlowPanel() {
   const search = holdings.filter((holding) => holding.search);
   const families = new Set(holdings.map((holding) => holding.family));
 
+  // No row of its own: the columns sit in the board's row, and share its width with EiN's.
   return (
-    <Group gap='xs' wrap='nowrap' align='flex-start'>
+    <>
       <FlowColumn
         title='At the media service'
         count={status.requests.length}
@@ -106,6 +107,6 @@ export default function FlowPanel() {
           {search.map((holding) => <ModelRow key={holding.key} holding={holding} />)}
         </Stack>
       </FlowColumn>
-    </Group>
+    </>
   );
 }

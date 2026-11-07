@@ -44,7 +44,7 @@
         "type": "secret",
         "default": "",
         "label": "Media service key",
-        "description": "The bearer key EMS expects (one of the lines in its keys file), sent only to the media service address above. Unset when EMS runs without keys. No shell sees it, and nothing shows it once it is set.",
+        "description": "The bearer key EMS expects (the first word of a line in its keys file, which names this system as a caller), sent only to the media service address above. Unset when EMS runs without keys. No shell sees it, and nothing shows it once it is set.",
         "group": "Media service",
         "restarts": [
           "ems-link"

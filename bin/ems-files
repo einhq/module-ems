@@ -57,7 +57,7 @@ emsFiles.spec = {
   daemon: true,
   effect: 'write' as const,
   json: false,
-  description: "Serve the files of the media service's requests in flight over SFTP, for an EMS that does not mount EiN's files (the ems-files service)",
+  description: "Serve the media service the files of its requests in flight over SFTP, the only way it reaches EiN's files (the ems-files service)",
   args: [],
   flags: [],
 };

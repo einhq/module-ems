@@ -1,4 +1,4 @@
 {
-  "description": "Serves the files of the media service's requests in flight over SFTP, for an EMS that does not mount EiN's files",
+  "description": "Serves the media service the files of its requests in flight over SFTP, the only way it reaches EiN's files",
   "restartPolicy": "on-failure"
 }

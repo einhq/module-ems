@@ -7,7 +7,8 @@
  * system's own EMS that names a file names this endpoint, as `CFG_EMS_FILES_ADDRESS` says EMS
  * reaches it, in its `EMS-Files` header: EMS reads the request's inputs and writes back its outputs
  * here, and nothing else, for as long as the request runs. With the address empty it serves
- * nothing, and those requests wait.
+ * nothing, and those requests wait. It serves from a thread of its own, so pipelines keeping EiN
+ * busy do not slow the media service's reads.
  */
 
 import type { CmdReturn, Command } from '@ein/client';
@@ -41,7 +42,8 @@ const emsFiles = async (cmd: Command): CmdReturn => {
   try {
     const listening = await server.start();
     await cmd.writeLn(`ems-files: serving the files of requests to ${url} on port ${listening}, as ${address}`);
-    await stopped;
+    const failed = await Promise.race([stopped, server.failed]);
+    if (failed) throw failed;
   } catch (error) {
     await cmd.writeError(`ems-files: ${error instanceof Error ? error.message : error}\n`);
     return 1;

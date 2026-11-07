@@ -425,7 +425,7 @@ const request = async (cmd: Command, op: string, body: Record<string, unknown>, 
       throw new EmsUnavailableError(`ems: ${op} answered ${response.status} with no usable body`);
     }
   } finally {
-    files.release();
+    void files.release();
   }
   if (!envelope.ok) {
     const code = envelope.error?.code ?? `http_${response.status}`;

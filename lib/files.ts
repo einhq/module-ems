@@ -11,7 +11,9 @@
  *
  * The state hangs off `globalThis` rather than this file: a module's files are loaded once per
  * process per content, so a daemon started before a module update and a bin loaded after it run
- * different copies of this file, and must still share one set of names.
+ * different copies of this file, and must still share one set of names. A thread of its own has
+ * a state of its own: the endpoint's worker keeps a copy of the names, which each change reaches
+ * through `mirrors` before the change is done.
  */
 
 import type { Command } from '@ein/client';
@@ -39,17 +41,33 @@ export type FilesEndpoint = {
   hostKey: string;
 };
 
+/** Names and directories added or ended together, as a copy of the names takes them in. */
+export type NamesChange = { set?: [string, Named][]; grants?: string[]; ended?: string[]; ungrants?: string[] };
+
+/** A copy of the names elsewhere; the promise settles once the copy has the change. */
+export type NamesMirror = (change: NamesChange) => Promise<void>;
+
 /**
  * `endpoints` by the media service they serve; `names` by their full path, `/<grant>/<n>-<name>`;
- * `grants` are the requests' directories.
+ * `grants` are the requests' directories; `mirrors` the copies kept of them.
  */
-type FilesState = { endpoints: Map<string, FilesEndpoint>; names: Map<string, Named>; grants: Set<string> };
+type FilesState = { endpoints: Map<string, FilesEndpoint>; names: Map<string, Named>; grants: Set<string>; mirrors: Set<NamesMirror> };
 
 const STATE = Symbol.for('ein.ems.files.names');
 
 export const filesState = (): FilesState => {
   const global = globalThis as unknown as Record<symbol, FilesState | undefined>;
-  return global[STATE] ??= { endpoints: new Map(), names: new Map(), grants: new Set() };
+  return global[STATE] ??= { endpoints: new Map(), names: new Map(), grants: new Set(), mirrors: new Set() };
+};
+
+/** Apply a change to this thread's names, and to every copy of them; settles when all have it. */
+export const changeNames = (change: NamesChange): Promise<void> => {
+  const { names, grants, mirrors } = filesState();
+  for (const [name, named] of change.set ?? []) names.set(name, named);
+  for (const directory of change.grants ?? []) grants.add(directory);
+  for (const name of change.ended ?? []) names.delete(name);
+  for (const directory of change.ungrants ?? []) grants.delete(directory);
+  return Promise.all([...mirrors].map((mirror) => mirror(change))).then(() => {});
 };
 
 /** An absolute path in its one spelling, or undefined for anything else. */
@@ -69,15 +87,15 @@ export const headerValue = (endpoint: FilesEndpoint): string => `address=${endpo
 
 /**
  * Names for `paths` in a directory of their own, until `release` is called: each a VFS path, or a
- * path on disk the caller made itself, which is what it stands for when it is not a node.
+ * path on disk the caller made itself, which is what it stands for when it is not a node. The
+ * names are served once this settles, and no longer once `release`'s promise has.
  */
 export const grant = async (
   cmd: Pick<Command, 'sys' | 'access'>,
   paths: { path: string; mode: Named['mode'] }[],
-): Promise<{ names: string[]; release: () => void }> => {
-  const { names, grants } = filesState();
+): Promise<{ names: string[]; release: () => Promise<void> }> => {
   const directory = `/${hex(16)}`;
-  const made: string[] = [];
+  const set: [string, Named][] = [];
   for (const [index, { path, mode }] of paths.entries()) {
     let named: Named = { mode, disk: path };
     try {
@@ -86,20 +104,14 @@ export const grant = async (
     } catch {
       // Not a node: a file on disk.
     }
-    const name = `${directory}/${index}-${basename(path) || 'file'}`;
-    names.set(name, named);
-    made.push(name);
+    set.push([`${directory}/${index}-${basename(path) || 'file'}`, named]);
   }
-  grants.add(directory);
-  let released = false;
+  await changeNames({ set, grants: [directory] });
+  const made = set.map(([name]) => name);
+  let released: Promise<void> | undefined;
   return {
     names: made,
-    release: () => {
-      if (released) return;
-      released = true;
-      for (const name of made) names.delete(name);
-      grants.delete(directory);
-    },
+    release: () => released ??= changeNames({ ended: made, ungrants: [directory] }),
   };
 };
 
@@ -113,7 +125,7 @@ export const forRequest = async <T>(
   cmd: Pick<Command, 'sys' | 'access'>,
   emsUrl: string,
   body: T,
-): Promise<{ body: T; headers: Record<string, string>; release: () => void } | undefined> => {
+): Promise<{ body: T; headers: Record<string, string>; release: () => Promise<void> } | undefined> => {
   const paths: { path: string; mode: Named['mode'] }[] = [];
   const refs: Record<string, unknown>[] = [];
   const copy = (value: unknown): unknown => {
@@ -131,7 +143,7 @@ export const forRequest = async <T>(
     return out;
   };
   const sent = copy(body) as T;
-  if (paths.length === 0) return { body, headers: {}, release: () => {} };
+  if (paths.length === 0) return { body, headers: {}, release: () => Promise.resolve() };
   const endpoint = filesState().endpoints.get(emsUrl);
   if (!endpoint) return undefined;
   const { names, release } = await grant(cmd, paths);

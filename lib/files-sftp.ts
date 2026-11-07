@@ -15,7 +15,6 @@
  * request ends, until the client closes it or the session ends.
  */
 
-import type { ResourceHandleIf } from '@ein/client';
 import { OPEN_MODE, type SFTP, STATUS_CODE } from 'ssh2';
 import { canonical, lookup, type Named } from './files.ts';
 
@@ -25,9 +24,18 @@ const MAX_READ = 256 * 1024 - 2 * 1024;
 /** The most one file call reads or writes for a run of neighbouring requests. */
 const MAX_RUN = 4 * 1024 * 1024;
 
+/** The part of a VFS handle a session uses. */
+export type NodeHandle = {
+  seek(offset: number, whence: 0): Promise<number>;
+  read(size: number): Promise<Uint8Array>;
+  write(data: Uint8Array): Promise<number>;
+  size(): Promise<number>;
+  close(): Promise<void>;
+};
+
 /** The VFS, for the names that stand for a node with no file on disk. */
 export type NodeAccess = {
-  open(path: string, mode: Named['mode']): Promise<ResourceHandleIf>;
+  open(path: string, mode: Named['mode']): Promise<NodeHandle>;
   stat(path: string): Promise<{ size: number; mtime?: number }>;
 };
 
@@ -51,7 +59,7 @@ const diskBody = async (path: string, mode: Named['mode']): Promise<Body> => {
   };
 };
 
-const nodeBody = (handle: ResourceHandleIf): Body => ({
+const nodeBody = (handle: NodeHandle): Body => ({
   seek: async (offset) => void await handle.seek(offset, 0),
   read: async (into) => {
     const data = await handle.read(into.length);

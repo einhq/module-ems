@@ -72,7 +72,11 @@ each request a directory of its own, `/<grant>/<n>-<VFS name>`, for as long as i
 the secret made when the service started and its host key; EMS mounts it with sshfs, reads the
 inputs there, and copies what it wrote back before it answers. A name stands for the node's file
 on disk, or for the node itself when it has none (the db tier), read and written through the VFS.
-`CFG_EMS_FILES_ADDRESS` is the endpoint as EMS reaches it; while it is empty or the service is
+The SSH server and its sessions run on a worker of their own ([files-thread.ts](../lib/files-thread.ts)),
+which keeps a copy of the names and reads and writes the files on disk itself, so EMS's reads do
+not wait behind the pipelines on EiN's event loop; only a db-tier node's calls go back to EiN's
+thread, one message each ([files-server.ts](../lib/files-server.ts)). A grant returns once the
+worker has its names. `CFG_EMS_FILES_ADDRESS` is the endpoint as EMS reaches it; while it is empty or the service is
 not serving, a request that names a file is `EmsUnavailableError` and waits. Three outcomes stay distinct for everything downstream:
 `EmsUnavailableError` (unreachable, timed out, interrupted, `busy`, or a model worker still loading —
 the step exits `STEP_EXIT_TEMPORARY` through `stepExitCode` and waits without spending an attempt),

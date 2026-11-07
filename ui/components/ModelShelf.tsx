@@ -50,11 +50,14 @@ export function ModelShelf({ status }: { status: Running }) {
                 const copies = byFamily.get(family)!;
                 return (
                   <Tooltip key={family} label={purpose.get(family)?.purpose ?? family} withArrow multiline maw={320} disabled={!purpose.get(family)?.purpose}>
-                    <Group gap={6} wrap='nowrap' px={8} py={4} style={{ borderRadius: 6, background: 'var(--mrx-surface-raised)' }}>
-                      {copies.some((copy) => copy.working) && <Box w={7} h={7} style={{ borderRadius: '50%', background: WORKLOAD_COLORS.running, flexShrink: 0 }} />}
-                      <Text size='sm' ff='monospace' style={{ flex: 1 }} truncate>{family}</Text>
-                      {copies.length > 0 && <Text size='xs' c='dimmed' style={{ whiteSpace: 'nowrap' }}>{where(copies)}</Text>}
-                    </Group>
+                    {/* Where it is under its name, so a long one (two copies, standby) never cuts the name short. */}
+                    <Stack gap={0} px={8} py={4} style={{ borderRadius: 6, background: 'var(--mrx-surface-raised)' }}>
+                      <Group gap={6} wrap='nowrap'>
+                        {copies.some((copy) => copy.working) && <Box w={7} h={7} style={{ borderRadius: '50%', background: WORKLOAD_COLORS.running, flexShrink: 0 }} />}
+                        <Text size='sm' ff='monospace' truncate>{family}</Text>
+                      </Group>
+                      {copies.length > 0 && <Text size='xs' c='dimmed'>{where(copies)}</Text>}
+                    </Stack>
                   </Tooltip>
                 );
               })}

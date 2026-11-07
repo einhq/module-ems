@@ -8,6 +8,9 @@ import { CARD_COLOR, RAM_COLOR } from './holdings.ts';
 const SAMPLE_MS = 60_000;
 const GAP_MS = 5 * SAMPLE_MS;
 const ROW = 14;
+/** Less than this of the card held by other containers is noise, not a chat model. */
+const OTHERS_MB = 256;
+const OTHERS_COLOR = 'var(--mantine-color-grape-6)';
 
 type Span = { from: number; to: number };
 
@@ -49,7 +52,7 @@ function Track({ children, label }: { children?: ReactNode; label: string }) {
 /**
  * The last hours of what the media service held, a row per model that was loaded: solid where it
  * was on the card, outlined where it was in RAM, with a line under it while a request used it; above
- * them the card's mode and EiN's work waiting at the same times (`ems-models`, from the `ems-models`
+ * them the card's mode, what other containers held of the card (the chat model), and EiN's work waiting at the same times (`ems-models`, from the `ems-models`
  * series). A model loaded again and again is a row that flickers; a search model on the card and in
  * RAM at once is its standby copy.
  */
@@ -110,6 +113,14 @@ export function ModelTimeline({ history }: { history?: EmsModels | null }) {
                 ))
               )}
             </Track>
+
+            {samples.some((sample) => (sample.value.othersMb ?? 0) >= OTHERS_MB) && (
+              <Track label='chat model and others'>
+                {spansWhere(samples, spans, (value) => (value.othersMb ?? 0) >= OTHERS_MB).map((span) => (
+                  <Box key={`others-${span.from}`} pos='absolute' top={2} bottom={2} left={x(span.from)} w={w(span)} style={{ borderRadius: 2, background: OTHERS_COLOR }} />
+                ))}
+              </Track>
+            )}
 
             {families.map((family) => (
               <Track key={family} label={family}>

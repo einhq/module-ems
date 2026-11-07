@@ -123,6 +123,17 @@ decoded as English; the transcript signature EMS reports
 (`GET /v0/capabilities`, `signatures.transcribe`) is what `media-scan` compares stamps against —
 derived on the side that decodes, so the two cannot disagree.
 
+On the system dashboard, the module draws its part of the Work tab's flow board (`ems.flow`, a
+`system.flow` panel, [ui/pages/flow.tsx](../ui/pages/flow.tsx)): EMS's lanes with their slots and
+requests, and the models it holds, the working ones first. Its Media service tab maps where the models
+are ([ui/components/MemoryMap.tsx](../ui/components/MemoryMap.tsx)): the card split into each model,
+EMS's runtime, the chat model and others, and free; RAM into each model and the workers. A search
+model's RAM copy beside its card copy while the card is quiet is drawn as standby: it is what answers
+the moment indexing takes the card, and is kept on purpose (ein/core#1070). The models sit on a shelf
+by what they are doing, and a strip shows the last hours: the `gpu-sampler` service appends
+`ems-models-sample` each minute to the `ems-models` series, what EMS holds beside EiN's work waiting
+(core's newest `pools` reading), and `ems-models` reads it back.
+
 EMS is not an EiN service, but the dashboard reads service rows, so the module carries one:
 `ems-link` ([modules/ems/services/ems-link](../services/ems-link)) polls `ems-status
 --brief` every minute and logs each change of reachability, runs failed work again when EMS's build

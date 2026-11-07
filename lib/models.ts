@@ -26,6 +26,9 @@ export const workWaiting = (pools: PoolsReading, triggerPool: string): { notStar
 export const modelsSample = (status: Running, waiting?: { notStarted: number; inLine: number }): EmsModelsSample => {
   const working = new Set(status.families.filter((family) => family.running).map((family) => family.name));
   for (const request of status.requests) if (request.started !== undefined && request.family) working.add(request.family);
+  // `nvidia-smi` in EMS's container lists only its own processes: the rest of what is used is other containers'.
+  const gpu = status.gpu;
+  const others = gpu?.processes && gpu.memUsedMb !== undefined ? Math.max(0, gpu.memUsedMb - gpu.processes.reduce((sum, process) => sum + process.usedMb, 0)) : undefined;
   return {
     mode: status.card?.mode ?? 'off',
     copies: status.families.flatMap((family) =>
@@ -37,6 +40,7 @@ export const modelsSample = (status: Running, waiting?: { notStarted: number; in
       }))
     ),
     working: [...working].sort(),
+    ...(others !== undefined ? { othersMb: others } : {}),
     ...(waiting ?? {}),
   };
 };

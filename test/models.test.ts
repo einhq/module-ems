@@ -9,7 +9,7 @@ const quiet: HealthResult = {
   ok: true,
   api: '0.3.1',
   uptime: 60,
-  gpu: { present: true },
+  gpu: { present: true, mem_used_mb: 9300, mem_total_mb: 16311, processes: [{ pid: 1, used_mb: 4100, worker: 'card' }] },
   models: {},
   worker: { running: true, restarts: 0 },
   card: { mode: 'quiet' },
@@ -36,6 +36,7 @@ Deno.test('a sample says the card mode, each copy and where it is, and the model
     { family: 'faces', place: 'card', worker: 'batch', state: 'loaded' },
   ]);
   assertEquals(sample.working, ['faces']);
+  assertEquals(sample.othersMb, 5200, 'what the card holds beyond EMS: the chat model');
   assertEquals([sample.notStarted, sample.inLine], [12, 30]);
 });
 

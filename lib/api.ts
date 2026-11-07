@@ -181,6 +181,8 @@ export type EmsModelsSample = {
   mode: EmsCardMode;
   copies: { family: string; place: 'card' | 'ram'; worker?: string; state: EmsCopyState }[];
   working: string[];
+  /** What other containers held of the card, in a standard install the chat model; absent when EMS cannot tell. */
+  othersMb?: number;
   notStarted?: number;
   inLine?: number;
 };

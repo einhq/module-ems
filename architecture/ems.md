@@ -43,13 +43,15 @@ it on its own. The budget lives in EMS's environment (`EMS_CPU_ENCODE_*`). Audio
 AAC in an `M4A`-branded MP4, with the bitrate and sample rate of the rendition table's audio role as ceilings against
 the source and a remux when the source is already AAC in an MP4-family container.
 
-**Sharing a host.** EMS runs as a container of its own beside EiN's. The two name the same four
-directories — `/files`, `/old`, `/files-volatile`, `/files-tmp` — mounted at the same container
-paths on both sides, which is what lets a path EiN resolves be a path EMS opens. The deployment
-gives this module its settings (`CFG_EMS_URL`, and `CFG_EMS_KEY`, one line of EMS's keys file);
-nothing here knows which hosts there are. EMS's own `gpu-check` runs real inference per model, the
-only honest test of a CUDA stack whose every fallback is silent. Originals are never copied: they
-stay on the archive's storage and are referenced by symlink.
+**Sharing a host.** EMS runs as a container of its own beside EiN's, on the same machine or another,
+and mounts none of EiN's folders: it reaches a request's files only through the `ems-files` service
+(_The ems module_ below), so a path in a request is a name `ems-files` gave it, never a path on
+EiN's disk. Two connections join them, one each way: EiN sends its requests to EMS over HTTP
+(`CFG_EMS_URL`), and EMS connects back to `ems-files` for the files they name
+(`CFG_EMS_FILES_ADDRESS`). The deployment gives this module those settings, and `CFG_EMS_KEY`, one
+line of EMS's keys file; nothing here knows which hosts there are. EMS's own `gpu-check` runs real
+inference per model, the only honest test of a CUDA stack whose every fallback is silent.
+Originals are never copied to EMS: it reads them through its mount where they lie.
 
 **The ems module.** Every model and every Python tool lives in EMS, the EiN Media Service (the
 `ein/ems` repository), not in this image: a model server's memory then cannot take HTTP, SSH and
@@ -74,7 +76,12 @@ which suits EMS on the same machine or network. With `CFG_EMS_FILES_TLS` it is T
 and EMS each pinning the other's certificate, both made at start
 ([files-cert.ts](../lib/files-cert.ts)). The request's `EMS-Files` header names the endpoint and
 the secret, or the certificates; EMS mounts it with sshfs, reads the inputs there, and copies what
-it wrote back before it answers. A name stands for the node's file on disk, or for the node itself
+it wrote back before it answers. The header travels in the request, so its credentials are only as
+private as the request is: plain HTTP to an EMS on the compose network, HTTPS when `CFG_EMS_URL`
+is an `https://` address. EMS makes one mount per endpoint, on the first request that names a
+file, and every request after uses it; between requests it serves nothing, as no name is granted.
+EMS mounts again when sshfs exits, or when the header names other credentials, which a restart of
+`ems-files` makes, letting go of the old mount at that address. A name stands for the node's file on disk, or for the node itself
 when it has none (the db tier), read and written through the VFS. A thread of its own listens,
 authenticates each connection and carries its bytes ([files-listen.ts](../lib/files-listen.ts)) to
 up to four session threads ([files-thread.ts](../lib/files-thread.ts)), each serving SFTP sessions

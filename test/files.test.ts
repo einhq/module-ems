@@ -63,6 +63,21 @@ Deno.test('grant: names in a directory of their own, each standing for its file,
   assertEquals(filesState().names.size, 0);
 });
 
+Deno.test('names kept in a state an earlier copy of files.ts made, which lacks what was added since', async () => {
+  const key = Symbol.for('ein.ems.files.names');
+  const global = globalThis as unknown as Record<symbol, unknown>;
+  const kept = global[key];
+  global[key] = { endpoints: new Map(), names: new Map(), grants: new Set() };
+  try {
+    const { names, release } = await grant(vfsOf({}), [{ path: '/files-tmp/made.bin', mode: 'write' }]);
+    assertEquals(lookup(names[0]), { mode: 'write', disk: '/files-tmp/made.bin' });
+    await release();
+    assertEquals(lookup(names[0]), undefined);
+  } finally {
+    global[key] = kept;
+  }
+});
+
 Deno.test('forRequest: every file and output at any depth goes by its name', async () => {
   filesState().endpoints.set(EMS_URL, { address: 'ein.test:2224', emsUrl: EMS_URL, user: FILES_USER, secret: 's', hostKey: 'ssh-ed25519 AAAA' });
   try {

@@ -48,10 +48,11 @@ export class FilesServer {
     const worker = new Worker(THREAD_URL, { type: 'module' });
     this.worker = worker;
     this.listening = Promise.withResolvers();
-    worker.onmessage = ({ data }: MessageEvent<FromThread>) => this.message(data);
+    // What the worker's events throw would end EiN's process, not this service: it is logged.
+    worker.onmessage = ({ data }: MessageEvent<FromThread>) => this.guard(() => this.message(data));
     worker.onerror = (event: ErrorEvent) => {
       event.preventDefault();
-      this.fail(new Error(`ems-files thread: ${event.message}`));
+      this.guard(() => this.fail(new Error(`ems-files thread: ${event.message}`)));
     };
     const { names, grants, mirrors } = filesState();
     // The copy starts with the names granted so far; the changes after follow it in order.
@@ -78,6 +79,14 @@ export class FilesServer {
     // The sessions close their node handles through this thread while they stop.
     await Promise.race([this.stopped.promise, this.failed]);
     this.end();
+  }
+
+  private guard(run: () => void): void {
+    try {
+      run();
+    } catch (error) {
+      this.options.log?.(`ems-files: ${error instanceof Error ? error.message : error}`);
+    }
   }
 
   private post(message: ToThread, transfer: Transferable[] = []): void {

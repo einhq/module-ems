@@ -56,8 +56,14 @@ type FilesState = { endpoints: Map<string, FilesEndpoint>; names: Map<string, Na
 const STATE = Symbol.for('ein.ems.files.names');
 
 export const filesState = (): FilesState => {
-  const global = globalThis as unknown as Record<symbol, FilesState | undefined>;
-  return global[STATE] ??= { endpoints: new Map(), names: new Map(), grants: new Set(), mirrors: new Set() };
+  const global = globalThis as unknown as Record<symbol, Partial<FilesState> | undefined>;
+  // A state an earlier copy of this file made lacks what was added since; the copy that needs it adds it.
+  const state = global[STATE] ??= {};
+  state.endpoints ??= new Map();
+  state.names ??= new Map();
+  state.grants ??= new Set();
+  state.mirrors ??= new Set();
+  return state as FilesState;
 };
 
 /** Apply a change to this thread's names, and to every copy of them; settles when all have it. */

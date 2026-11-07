@@ -15,10 +15,13 @@ them is EMS's.
 
 **No GPU in this container.** The card is EMS's: the models, the CUDA keyframe and poster
 extractions and the transcodes' NVDEC/NVENC chain all run there, and EiN's container gets
-no device. The media `models` pool worker survives, because EMS's queue is FIFO and bounded and
-cannot choose between EiN's backlogs: `CFG_MODEL_SLOTS` is how many model-bound steps EiN
-keeps in flight against EMS at once, and its kinds (`faces`, `embed-picture`, `embed-text`,
-`transcribe`, `diarize`) are the backlogs it rotates between. Nothing on this side names a
+no device. The media `models` pool worker survives: `CFG_MODEL_SLOTS` is how many model-bound
+steps EiN keeps in flight against EMS at once, and its kinds (`faces`, `embed-picture`,
+`embed-text`, `transcribe`, `diarize`) are the backlogs it rotates between. EMS chooses only among
+what is sent: its admission gives a freed slot to interactive work, then to the caller (a key,
+named in EMS's keys file) that has used it the least for its weight, then to a request for a model
+family already running, so a system that keeps more in flight than EMS runs lets EMS keep a loaded
+family busy, and one that keeps fewer chooses for itself (ein/core#1068). Nothing on this side names a
 device or a VRAM figure; whether EMS answers on the card or the CPU is EMS's decision, reported in
 its health as `degraded`.
 

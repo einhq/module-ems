@@ -67,6 +67,8 @@ export type EmsFamily = {
 /** An admission slot held or waited for. Times are epoch seconds; no `started` means queued. */
 export type EmsRequest = {
   op: string;
+  /** Who it is from: the name its key has in EMS's keys file. */
+  caller?: string;
   lane: string;
   interactive: boolean;
   queued: number;
@@ -82,6 +84,13 @@ type EmsGpuProcess = { pid: number; usedMb: number; worker?: string };
 export type EmsWorkerMemory = { rssMb?: number; maxRssMb?: number; recycles?: number };
 
 export type EmsLane = { running: number; waiting: number; limit: number; reserve: number };
+
+/**
+ * A caller of EMS, by the name its key has: its share against the others' (`weight`), the
+ * slot-seconds it has held since EMS started, and its requests running and waiting now. A freed
+ * slot goes to the caller that has used the least for its weight.
+ */
+export type EmsCaller = { weight: number; usedSeconds: number; running: number; waiting: number };
 
 export type EmsDegradation = {
   what: string;
@@ -135,6 +144,7 @@ export type EmsStatus =
     /** The query worker's memory: its models are on the CPU, so this is where they show. */
     queryWorker?: EmsWorkerMemory;
     queues?: Record<string, EmsLane>;
+    callers?: Record<string, EmsCaller>;
     warnings?: string[];
   };
 

@@ -99,6 +99,13 @@ export const statusFromHealth = (result: HealthResult, url: string): Extract<Ems
     ...(result.process?.recycles ? { recycles: result.process.recycles } : {}),
     ...(result.process?.query ? { queryWorker: memoryOf(result.process.query) } : {}),
     ...(result.queues ? { queues: result.queues } : {}),
+    ...(result.callers
+      ? {
+        callers: Object.fromEntries(
+          Object.entries(result.callers).map(([name, c]) => [name, { weight: c.weight, usedSeconds: c.used_seconds, running: c.running, waiting: c.waiting }]),
+        ),
+      }
+      : {}),
     ...(result.warnings?.length ? { warnings: result.warnings } : {}),
   };
 };

@@ -197,7 +197,9 @@ export type HealthResult = {
     copies?: ({ key: string; state: 'loading' | 'loaded' | 'unloading'; since?: number | null; last_used?: number; device?: string; worker?: string } & EmsSize)[];
   }>;
   /** Every admission slot held or waited for, oldest first. */
-  requests: { op: string; lane: string; interactive: boolean; queued: number; started?: number; family?: string }[];
+  requests: { op: string; caller?: string; lane: string; interactive: boolean; queued: number; started?: number; family?: string }[];
+  /** Each caller, by the name its key has: its weight, the slot-seconds it has used, and its requests running and waiting now. */
+  callers?: Record<string, { weight: number; used_seconds: number; running: number; waiting: number }>;
   /**
    * Who has the card (*3.4*): `busy` while batch model work arrives, `quiet` after `quiet_after`
    * seconds without any, when a card worker holds the search models that fit; `off` with no card.

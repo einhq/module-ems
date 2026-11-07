@@ -81,7 +81,8 @@ Deno.test('the card, its processes, the sizes and the query worker come through 
         measured: { 'whisper:cuda:float16': { vram_mb: 3000, ram_mb: 600, load_seconds: 15.5 } },
       },
     },
-    requests: [{ op: 'speech.transcribe', lane: 'models', interactive: false, queued: 1, started: 2, family: 'whisper' }],
+    requests: [{ op: 'speech.transcribe', caller: 'default', lane: 'models', interactive: false, queued: 1, started: 2, family: 'whisper' }],
+    callers: { default: { weight: 1, used_seconds: 812.5, running: 1, waiting: 0 } },
   }, 'http://ems');
 
   assertEquals(status.gpu?.name, 'A Card');
@@ -93,6 +94,8 @@ Deno.test('the card, its processes, the sizes and the query worker come through 
   assertEquals(whisper.copies[0], { key: 'whisper:cuda:float16', state: 'loaded', vramMb: 3000, ramMb: 600, loadSeconds: 15.5 });
   assertEquals(whisper.measured, { 'whisper:cuda:float16': { vramMb: 3000, ramMb: 600, loadSeconds: 15.5 } });
   assertEquals(status.requests[0].family, 'whisper');
+  assertEquals(status.requests[0].caller, 'default');
+  assertEquals(status.callers, { default: { weight: 1, usedSeconds: 812.5, running: 1, waiting: 0 } });
 });
 
 Deno.test('the card mode comes through, and each family carries where it runs in each mode', () => {

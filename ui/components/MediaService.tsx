@@ -1,5 +1,5 @@
 import { Alert, Badge, Box, Card, ColorSwatch, Group, HoverCard, Loader, Progress, SimpleGrid, Skeleton, Stack, Table, Text, Title, Tooltip } from '@mantine/core';
-import type { EmsCardMode, EmsFamily, EmsLane, EmsModelCopy, EmsModelSize, EmsPlacement, EmsRequest, EmsStatus, EmsWorkerMemory } from '@ems/api';
+import type { EmsCaller, EmsCardMode, EmsFamily, EmsLane, EmsModelCopy, EmsModelSize, EmsPlacement, EmsRequest, EmsStatus, EmsWorkerMemory } from '@ems/api';
 import { StatTile, TablerIcon, utilizationColor } from '@ein/ui/components';
 import { formatUptime } from '@ein/ui/lib';
 
@@ -120,7 +120,7 @@ export function MediaService({ status, error }: Props) {
       {(status.warnings ?? []).map((warning) => <Alert key={warning} color='yellow' variant='light' icon={<TablerIcon name='alert-triangle' size={16} />}>{warning}</Alert>)}
       <Memory status={status} />
       <Models families={families} mode={status.card?.mode} />
-      <Requests requests={status.requests} queues={status.queues} families={families} />
+      <Requests requests={status.requests} queues={status.queues} callers={status.callers} families={families} />
     </Stack>
   );
 }
@@ -598,10 +598,64 @@ function Lane({ name, lane }: { name: string; lane: EmsLane }) {
   );
 }
 
-function Requests({ requests, queues, families }: { requests: EmsRequest[]; queues?: Running['queues']; families: EmsFamily[] }) {
+/**
+ * The callers EMS serves, when there is more than one: a freed slot goes to the one that has used
+ * the least for its weight, so this is where one core's crawl crowding out another's would show.
+ */
+function Callers({ callers }: { callers: Record<string, EmsCaller> }) {
+  return (
+    <Box mb='md'>
+      <Text size='sm' fw={500} mb={4}>Callers</Text>
+      <Text size='xs' c='dimmed' mb='xs'>
+        The systems that send EMS work, each by the name its key has. When requests wait, the next slot goes to the caller that has used EMS the least for its weight.
+      </Text>
+      <Table.ScrollContainer minWidth={420}>
+        <Table verticalSpacing={4}>
+          <Table.Thead>
+            <Table.Tr>
+              <Table.Th>Caller</Table.Th>
+              <Table.Th ta='right'>Weight</Table.Th>
+              <Table.Th ta='right'>Used</Table.Th>
+              <Table.Th ta='right'>Running</Table.Th>
+              <Table.Th ta='right'>Waiting</Table.Th>
+            </Table.Tr>
+          </Table.Thead>
+          <Table.Tbody>
+            {Object.entries(callers).map(([name, caller]) => (
+              <Table.Tr key={name}>
+                <Table.Td>
+                  <Text size='sm' ff='monospace'>{name}</Text>
+                </Table.Td>
+                <Table.Td ta='right'>
+                  <Text size='xs'>{caller.weight}</Text>
+                </Table.Td>
+                <Table.Td ta='right'>
+                  <Tooltip label='Slot-seconds held since EMS started, running requests included' withArrow>
+                    <Text size='xs' ff='monospace'>{formatUptime(caller.usedSeconds * 1000)}</Text>
+                  </Tooltip>
+                </Table.Td>
+                <Table.Td ta='right'>
+                  <Text size='xs'>{caller.running}</Text>
+                </Table.Td>
+                <Table.Td ta='right'>
+                  <Text size='xs' c={caller.waiting > 0 ? 'orange' : undefined}>{caller.waiting}</Text>
+                </Table.Td>
+              </Table.Tr>
+            ))}
+          </Table.Tbody>
+        </Table>
+      </Table.ScrollContainer>
+    </Box>
+  );
+}
+
+function Requests(
+  { requests, queues, callers, families }: { requests: EmsRequest[]; queues?: Running['queues']; callers?: Record<string, EmsCaller>; families: EmsFamily[] },
+) {
   const states = requestStates(requests, families);
   const rows = [...requests].sort((a, b) => (a.started ?? Infinity) - (b.started ?? Infinity) || a.queued - b.queued);
   const hasFamilies = rows.some((request) => request.family);
+  const several = Object.keys(callers ?? {}).length > 1;
 
   return (
     <Card>
@@ -617,12 +671,14 @@ function Requests({ requests, queues, families }: { requests: EmsRequest[]; queu
           {Object.entries(queues).map(([name, lane]) => <Lane key={name} name={name} lane={lane} />)}
         </SimpleGrid>
       )}
+      {several && callers && <Callers callers={callers} />}
       {rows.length === 0 ? <Text size='sm' c='dimmed'>Nothing running</Text> : (
         <Table.ScrollContainer minWidth={560}>
           <Table striped verticalSpacing='xs'>
             <Table.Thead>
               <Table.Tr>
                 <Table.Th>Operation</Table.Th>
+                {several && <Table.Th>Caller</Table.Th>}
                 <Table.Th>Lane</Table.Th>
                 {hasFamilies && <Table.Th>Model</Table.Th>}
                 <Table.Th>State</Table.Th>
@@ -640,6 +696,11 @@ function Requests({ requests, queues, families }: { requests: EmsRequest[]; queu
                         {request.interactive && <Badge size='xs' variant='light' color='violet'>interactive</Badge>}
                       </Group>
                     </Table.Td>
+                    {several && (
+                      <Table.Td>
+                        <Text size='xs' ff='monospace'>{request.caller ?? '—'}</Text>
+                      </Table.Td>
+                    )}
                     <Table.Td>
                       <Text size='xs' c='dimmed'>{request.lane}</Text>
                     </Table.Td>

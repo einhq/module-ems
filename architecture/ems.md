@@ -20,8 +20,9 @@ steps EiN keeps in flight against EMS at once, and its kinds (`faces`, `embed-pi
 `embed-text`, `transcribe`, `diarize`) are the backlogs it rotates between. EMS chooses only among
 what is sent: its admission gives a freed slot to interactive work, then to the caller (a key,
 named in EMS's keys file) that has used it the least for its weight, then to a request for a model
-family already running, so a system that keeps more in flight than EMS runs lets EMS keep a loaded
-family busy, and one that keeps fewer chooses for itself (ein/core#1068). Nothing on this side names a
+family already running. It holds no backlog, so keeping a family loaded and working is the models
+worker's: claiming one kind at a time was faster on fry than offering EMS every kind at once,
+which made it switch models every few requests (ein/core#1068). Nothing on this side names a
 device or a VRAM figure; whether EMS answers on the card or the CPU is EMS's decision, reported in
 its health as `degraded`.
 

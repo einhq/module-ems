@@ -19,8 +19,11 @@ import { type EmsInstance, generationsDiffer, INSTANCE_NAME, type InstanceNode, 
 
 const ACTIONS = ['list', 'show', 'add', 'set', 'remove'];
 
-/** How long `list` waits for each instance's capabilities. */
-const WAIT_SECONDS = 5;
+/**
+ * How long `list` waits for each instance's capabilities, which wait on its model worker: while
+ * that loads its models, right after a restart, they take tens of seconds.
+ */
+const WAIT_SECONDS = 15;
 
 /** A field `show` prints alone, and how. */
 const FIELDS = ['url', 'filesAddress', 'modelSlots', 'cpuSlots', 'answering', 'calls', 'ops'] as const;

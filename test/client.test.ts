@@ -9,7 +9,7 @@
  */
 
 import { assert, assertAlmostEquals, assertEquals, assertRejects, assertStringIncludes } from '@std/assert';
-import type { Command } from '@ein/client';
+import { type Command, STEP_EXIT_TEMPORARY } from '@ein/client';
 import type { DetectVideoFacesResult } from '../lib/client.ts';
 import {
   activeSpeakers,
@@ -17,11 +17,14 @@ import {
   detectVideoFaces,
   embedTexts,
   EmsError,
+  EmsNotServedError,
   EmsUnavailableError,
   extractText,
   fingerprint,
   generations,
   health,
+  isFileFault,
+  stepExitCode,
   transcribe,
   voiceprint,
 } from '../lib/client.ts';
@@ -259,6 +262,35 @@ Deno.test('an answered failure is EmsError with the API permanence; busy and a l
   } finally {
     await stub.close();
   }
+});
+
+Deno.test('an op the instance does not serve, or a file endpoint it cannot reach, is unavailability: another may do it', async () => {
+  const stub = startStubEms({
+    ops: {
+      'faces.detect': { error: { code: 'op_not_served', message: 'faces.detect is not served by this instance (laptop)', permanent: true }, status: 404 },
+      'speech.transcribe': { error: { code: 'http_404', message: 'Not Found' }, status: 404 },
+      'text.embed': { error: { code: 'files_unavailable', message: 'could not mount the caller', permanent: false }, status: 502 },
+    },
+  });
+  try {
+    const { cmd } = makeCmd({ CFG_EMS_URL: stub.url });
+    const notServed = await assertRejects(() => detectFaces(cmd, '/f/a.jpg'), EmsNotServedError, 'op_not_served');
+    assertEquals(stepExitCode(notServed), STEP_EXIT_TEMPORARY);
+    assertEquals(isFileFault(notServed), false);
+    await assertRejects(() => transcribe(cmd, '/f/a.wav'), EmsNotServedError, 'http_404');
+    const files = await assertRejects(() => embedTexts(cmd, ['x']), EmsUnavailableError, 'files_unavailable');
+    assertEquals(stepExitCode(files), STEP_EXIT_TEMPORARY);
+  } finally {
+    await stub.close();
+  }
+});
+
+Deno.test("only undecodable, unsupported and refused are the file's own fault", () => {
+  const failure = (code: string, permanent = true) => new EmsError('ocr.read', code, 'x', permanent, 422);
+  for (const code of ['undecodable', 'unsupported', 'refused']) assertEquals(isFileFault(failure(code)), true, code);
+  for (const code of ['invalid_request', 'path_not_granted', 'not_found', 'tool_failed']) assertEquals(isFileFault(failure(code)), false, code);
+  assertEquals(isFileFault(failure('undecodable', false)), false);
+  assertEquals(isFileFault(new EmsUnavailableError('down')), false);
 });
 
 Deno.test('no EMS at all is unavailability, never an exception of another shape', async () => {

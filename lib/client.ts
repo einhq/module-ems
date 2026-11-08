@@ -235,8 +235,25 @@ export class EmsError extends Error {
 /** EMS could not be reached, did not answer in time, or answered with nothing usable. */
 export class EmsUnavailableError extends Error {}
 
+/**
+ * The EMS asked does not serve the op: `op_not_served` (its `EMS_OPS` leaves it out), or no route
+ * for it at all. A fact about that instance, not the file, so it counts as EMS being away: another
+ * instance, or this one set up again, does the work.
+ */
+export class EmsNotServedError extends EmsUnavailableError {}
+
 /** EMS's codes that say the input is the problem: no retry can get past the same bytes. */
 const INPUT_CODES = new Set(['undecodable', 'unsupported', 'not_found']);
+
+/** EMS's codes that are the file's own fault: a step may record the file as unreadable for them. */
+const FILE_FAULTS = new Set(['undecodable', 'unsupported', 'refused']);
+
+/**
+ * Whether EMS failed because of the file itself — bytes no decoder opens, a format nothing handles,
+ * work EMS refuses for this source — so that no run, on any instance, gets further with it. Every
+ * other failure, a permanent one included, says nothing about the file.
+ */
+export const isFileFault = (error: unknown): error is EmsError => error instanceof EmsError && error.permanent && FILE_FAULTS.has(error.code);
 
 /**
  * The exit code a pipeline step's bin ends with when an EMS call failed: whether the failure is
@@ -434,9 +451,11 @@ const request = async (cmd: Command, op: string, body: Record<string, unknown>, 
   if (!envelope.ok) {
     const code = envelope.error?.code ?? `http_${response.status}`;
     const message = envelope.error?.message ?? `HTTP ${response.status}`;
-    // A full queue or a worker still loading is, for a caller, the same as no EMS at all: the
-    // step fails now and the pool tries again later.
-    if (code === 'busy' || code === 'model_unavailable') throw new EmsUnavailableError(`ems: ${op} ${message} (${code})`);
+    // A full queue, a worker still loading or a file endpoint EMS could not reach is, for a caller,
+    // the same as no EMS at all: the step fails now and the pool tries again later.
+    if (code === 'busy' || code === 'model_unavailable' || code === 'files_unavailable') throw new EmsUnavailableError(`ems: ${op} ${message} (${code})`);
+    // An EMS that predates EMS_OPS has no route for an op it lacks, and answers 404 without an envelope.
+    if (code === 'op_not_served' || code === 'http_404') throw new EmsNotServedError(`ems: ${op} ${message} (${code})`);
     throw new EmsError(op, code, message, envelope.error?.permanent === true, response.status);
   }
   return { result: envelope.result, meta: envelope.meta };

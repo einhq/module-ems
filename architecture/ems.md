@@ -94,10 +94,12 @@ wait behind the pipelines on EiN's event loop; only a db-tier node's calls go ba
 one message each ([files-server.ts](../lib/files-server.ts)). A grant returns once every session
 thread has its names. `CFG_EMS_FILES_ADDRESS` is the endpoint as EMS reaches it; while it is empty or the service is
 not serving, a request that names a file is `EmsUnavailableError` and waits. Three outcomes stay distinct for everything downstream:
-`EmsUnavailableError` (unreachable, timed out, interrupted, `busy`, or a model worker still loading —
+`EmsUnavailableError` (unreachable, timed out, interrupted, `busy`, a model worker still loading, a
+file endpoint EMS could not reach, or — as `EmsNotServedError` — an op that instance does not serve —
 the step exits `STEP_EXIT_TEMPORARY` through `stepExitCode` and waits without spending an attempt),
 `EmsError` carrying the API's `code` and `permanent`
-(`index-document` marks a file with a permanent failure as not extractable rather than retrying),
+(`index-document`, `read-text` and `detect-chapters` mark a file as unreadable only for the file's own
+faults, `isFileFault`: `undecodable`, `unsupported` and `refused`),
 and a `null` result meaning "nothing found" — no face inside the box, too little to judge an
 active speaker on. There is no in-process fallback any more; the models are not in this image.
 Face boxes and landmarks arrive as fractions of the display frame, which is what the face nodes store,

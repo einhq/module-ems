@@ -151,6 +151,13 @@
       }
     ]
   },
+  "environment": [
+    {
+      "key": "CFG_EMS_INSTANCE",
+      "kind": "pipeline",
+      "description": "Which instance of the media service a step calls (ems-instance list): set by the pool worker for another instance on each step it runs; unset, the primary."
+    }
+  ],
   "ui": {
     "routes": {
       "/system/gpu": "ui/pages/gpu.tsx",

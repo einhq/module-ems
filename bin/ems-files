@@ -8,16 +8,25 @@
  * other's certificate. Every request to the
  * system's own EMS that names a file names this endpoint, as `CFG_EMS_FILES_ADDRESS` says EMS
  * reaches it, in its `EMS-Files` header: EMS reads the request's inputs and writes back its outputs
- * here, and nothing else, for as long as the request runs. With the address empty it serves
+ * here, and nothing else, for as long as the request runs. A request to another instance names it
+ * as that instance reaches it (`ems-instance`'s files address), and the instances are read again
+ * every half minute, so one added is served without a restart. With the address empty it serves
  * nothing, and those requests wait. It serves from threads of its own, several connections on
  * several, so pipelines keeping EiN busy do not slow the media service's reads.
  */
 
 import type { CmdReturn, Command } from '@ein/client';
-import { emsUrl } from '@ems/client';
 import { FilesServer } from '@ems/files-server';
+import { listInstances } from '@ems/instances';
 
 const DEFAULT_PORT = 2224;
+
+/** How often the instances are read again. */
+const INSTANCES_EVERY_MS = 30_000;
+
+/** Each instance's address, and how it reaches this endpoint: its own files address, or the primary's. */
+const targetsOf = async (cmd: Command, address: string): Promise<{ emsUrl: string; address: string }[]> =>
+  (await listInstances(cmd)).map((instance) => ({ emsUrl: instance.url, address: instance.primary ? address : instance.filesAddress || address }));
 
 const emsFiles = async (cmd: Command): CmdReturn => {
   const stopped = new Promise<void>((resolve) => cmd.onInterrupt(resolve));
@@ -33,7 +42,8 @@ const emsFiles = async (cmd: Command): CmdReturn => {
     return 1;
   }
   const tls = (cmd.env.CFG_EMS_FILES_TLS ?? '').trim() === 'true';
-  const url = emsUrl(cmd);
+  const [primary] = await targetsOf(cmd, address);
+  const url = primary.emsUrl;
   const nodes = {
     open: (path: string, mode: 'read' | 'write') => cmd.sys.vfs.open(cmd.access, path, { mode: mode === 'read' ? 'r' as const : 'w' as const }),
     stat: async (path: string) => {
@@ -42,15 +52,31 @@ const emsFiles = async (cmd: Command): CmdReturn => {
     },
   };
   const server = new FilesServer({ port, address, emsUrl: url, tls, nodes, log: (line) => void cmd.writeLn(line).catch(() => {}) });
+  let refresh: ReturnType<typeof setTimeout> | undefined;
+  let served = '';
+  let ending = false;
+  const publish = async () => {
+    const targets = await targetsOf(cmd, address).catch(() => undefined);
+    if (targets) {
+      server.publish(targets);
+      const now = targets.map((target) => `${target.emsUrl} as ${target.address}`).join(', ');
+      if (now !== served) await cmd.writeLn(`ems-files: serving the files of requests to ${now}`);
+      served = now;
+    }
+    if (!ending) refresh = setTimeout(publish, INSTANCES_EVERY_MS);
+  };
   try {
     const listening = await server.start();
-    await cmd.writeLn(`ems-files: serving the files of requests to ${url} on port ${listening}, as ${address}, ${tls ? 'over TLS' : 'plain'}`);
+    await cmd.writeLn(`ems-files: listening on port ${listening}, ${tls ? 'over TLS' : 'plain'}`);
+    await publish();
     const failed = await Promise.race([stopped, server.failed]);
     if (failed) throw failed;
   } catch (error) {
     await cmd.writeError(`ems-files: ${error instanceof Error ? error.message : error}\n`);
     return 1;
   } finally {
+    ending = true;
+    clearTimeout(refresh);
     await server.stop();
   }
   return 0;

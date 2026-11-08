@@ -100,10 +100,12 @@ export type EmsDegradation = {
 
 /** `ems-status`: the media service's health, or that it is not answering. */
 export type EmsStatus =
-  | { running: false; url: string }
+  | { running: false; url: string; instance?: string }
   | {
     running: true;
     url: string;
+    /** Which instance this is (`main`, the primary, or another `ems-instance` names). */
+    instance?: string;
     /** The API version EMS speaks. */
     api: string;
     /** What EMS is: package version and, when the image came from a checkout, its commit. */
@@ -219,3 +221,44 @@ export type EmsModelsSample = {
  * flickers.
  */
 export type EmsModels = { windowMs: number; samples: { at: number; value: EmsModelsSample }[] };
+
+/** `GET /v0/capabilities`, in EMS's own field names: what an instance serves and stamps its results with. */
+export type EmsCapabilities = {
+  api?: string;
+  /** What the instance calls itself (`EMS_NAME`). */
+  name?: string;
+  build?: { version?: string; commit?: string; date?: string };
+  gpu?: { present: boolean; name?: string; memory_mb?: number };
+  /** The ops it serves. */
+  ops?: string[];
+  tools?: Record<string, string>;
+  models?: { text_embed?: string; whisper?: string; faces?: string; image_embed?: string; ocr?: string };
+  limits?: { models?: number; tools?: number; encodes?: number; queue_depth?: number; interactive_reserve?: number };
+  encode?: { video_encoder?: string; cpu_budget?: string };
+  signatures?: { transcribe?: string };
+};
+
+/**
+ * One instance of the media service, as `ems-instance list` answers: what EiN holds of it, and
+ * whether it answers and what it says it is. `main` is the primary, the media service settings.
+ */
+export type EmsInstanceRow = {
+  name: string;
+  primary: boolean;
+  url: string;
+  /** Where it reaches EiN's files; the primary's address when its own is unset. */
+  filesAddress: string | null;
+  /** Whether a key goes with its requests. */
+  keySet: boolean;
+  /** Slots EiN keeps in flight against it, as set or from its limits; null when neither says. */
+  modelSlots: number | null;
+  cpuSlots: number | null;
+  answering: boolean;
+  /** As its capabilities say, while it answers: its own name, the ops it serves, its card and build. */
+  calls?: string;
+  ops?: string[];
+  gpu?: { present: boolean; name?: string; memoryMb?: number };
+  build?: { version?: string; commit?: string; date?: string };
+  /** For a second instance: the ops it serves that it stamps otherwise than the primary, which it is not given. */
+  differs?: string[];
+};

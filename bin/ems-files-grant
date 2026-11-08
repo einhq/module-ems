@@ -12,7 +12,7 @@
 import type { CmdReturn, Command } from '@ein/client';
 import { collectUnknownFlags, parseArgs, reportUnknownFlags } from '@ein/client';
 import { canonical, filesState, grant, headerValue } from '@ems/files';
-import { emsUrl } from '@ems/client';
+import { emsInstance } from '@ems/client';
 
 const DEFAULT_SECONDS = 300;
 
@@ -24,7 +24,7 @@ const emsFilesGrant = async (cmd: Command): CmdReturn => {
     unknown: collectUnknownFlags(unknown),
   });
   if (await reportUnknownFlags(cmd, unknown)) return 1;
-  const endpoint = filesState().endpoints.get(emsUrl(cmd));
+  const endpoint = filesState().endpoints.get((await emsInstance(cmd)).url);
   if (!endpoint) {
     await cmd.writeError('ems-files-grant: ems-files serves nothing (CFG_EMS_FILES_ADDRESS is empty, or the service is not running)\n');
     return 1;

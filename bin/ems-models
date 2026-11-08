@@ -1,28 +1,31 @@
 #!ts
 /**
- * ems-models — what the media service held over the last hours, a sample a minute, with the work
- * EiN had waiting at the same times: the Media service tab's strip, where a model loaded again and
- * again shows as a row that flickers.
+ * ems-models — what an instance of the media service held over the last hours, the primary or the
+ * one `--instance` names, a sample a minute, with the work EiN had waiting at the same times: the
+ * Media service tab's strip, where a model loaded again and again shows as a row that flickers.
  *
- * Read back from the `ems-models` series the `gpu-sampler` service keeps (`ems-models-sample`).
+ * Read back from the instance's `ems-models` series the `gpu-sampler` service keeps
+ * (`ems-models-sample`).
  */
 
 import type { CmdReturn, Command } from '@ein/client';
 import { collectUnknownFlags, parseArgs, readTail, reportUnknownFlags, seriesPath } from '@ein/client';
 import type { EmsModels, EmsModelsSample } from '@ems/api';
+import { instanceSeries, PRIMARY } from '@ems/instances';
 
 const HOUR = 60 * 60 * 1000;
 const DEFAULT_HOURS = 6;
 
 const emsModels = async (cmd: Command): CmdReturn => {
   const unknown: string[] = [];
-  const flags = parseArgs(cmd.args, { string: ['hours'], unknown: collectUnknownFlags(unknown) });
+  const flags = parseArgs(cmd.args, { string: ['hours', 'instance'], unknown: collectUnknownFlags(unknown) });
   if (await reportUnknownFlags(cmd, unknown)) return 1;
   const hours = Math.min(24, Math.max(1, Number(flags.hours ?? DEFAULT_HOURS) || DEFAULT_HOURS));
   const windowMs = hours * HOUR;
   const since = Date.now() - windowMs;
   // A sample a minute, and room for a stretch written denser (a restart of the sampler).
-  const samples = (await readTail<EmsModelsSample>(cmd.sys.vfs, cmd.access, seriesPath('ems-models'), Math.ceil(hours * 60 * 1.5) + 2))
+  const series = seriesPath(instanceSeries('ems-models', String(flags.instance || PRIMARY)));
+  const samples = (await readTail<EmsModelsSample>(cmd.sys.vfs, cmd.access, series, Math.ceil(hours * 60 * 1.5) + 2).catch(() => []))
     .filter((sample) => sample.at >= since);
 
   const answer: EmsModels = { windowMs, samples };
@@ -46,8 +49,11 @@ emsModels.spec = {
   effect: 'read' as const,
   description: 'What the media service held over the last hours, a sample a minute, with the work EiN had waiting beside it',
   args: [],
-  flags: [{ name: 'hours', type: 'string' as const, description: `Hours of history, 1 to 24 (default ${DEFAULT_HOURS})` }],
-  examples: ['ems-models', 'ems-models --hours 24'],
+  flags: [
+    { name: 'hours', type: 'string' as const, description: `Hours of history, 1 to 24 (default ${DEFAULT_HOURS})` },
+    { name: 'instance', type: 'string' as const, description: 'The instance (ems-instance list); main, the primary, by default' },
+  ],
+  examples: ['ems-models', 'ems-models --hours 24', 'ems-models --instance laptop'],
   returns: 'windowMs and samples: at, and mode, copies, working, notStarted and inLine.',
 };
 

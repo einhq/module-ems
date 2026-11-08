@@ -1,17 +1,20 @@
 #!ts
 /**
- * ems-gpu — the media service's card now, with its last six hours, for the system dashboard's GPU
- * panel (ems's `system.overview` panel).
+ * ems-gpu — the card of an instance of the media service now, the primary's or the one `--instance`
+ * names, with its last six hours, for the system dashboard's GPU panel (ems's `system.overview`
+ * panel).
  *
- * Read back from the `gpu` metrics series the `gpu-sampler` service keeps, so a dashboard open in
- * three browsers costs no request to EMS. Null when there is no reading: no media service, or one
- * that sees no card — no GPU and an idle GPU are not the same fact.
+ * Read back from the instance's `gpu` metrics series the `gpu-sampler` service keeps, so a dashboard
+ * open in three browsers costs no request to EMS. Null when there is no reading: no media service,
+ * or one that sees no card — no GPU and an idle GPU are not the same fact.
  *
  * `--gauge` answers the gauges `top` draws beside the host's RAM (the `gpu-sampler` service's
- * `gaugeCommand`): the card's utilization and its memory, or none without a reading.
+ * `gaugeCommand`): each card's utilization and its memory, another instance's named after it, and
+ * none for an instance without a reading.
  */
 import { type CmdReturn, collectUnknownFlags, type Command, type Gauge, parseArgs, readTail, reportUnknownFlags, seriesPath } from '@ein/client';
 import type { EmsGpu, GpuPoint, GpuSample } from '@ems/api';
+import { instanceSeries, otherInstanceNames, PRIMARY } from '@ems/instances';
 
 /** Six hours at the sampler's 15 s. */
 const WINDOW_MS = 6 * 60 * 60 * 1000;
@@ -34,17 +37,13 @@ const points = (samples: { at: number; value: GpuSample }[], value: (entry: GpuS
     return v === undefined ? [] : [{ at: sample.at, value: v }];
   });
 
-const emsGpu = async (cmd: Command): CmdReturn => {
-  const unknown: string[] = [];
-  const flags = parseArgs(cmd.args, { boolean: ['gauge'], unknown: collectUnknownFlags(unknown) });
-  if (await reportUnknownFlags(cmd, unknown)) return 1;
-
-  const all = await readTail<GpuSample>(cmd.sys.vfs, cmd.access, seriesPath('gpu'), READ_LIMIT);
+/** An instance's card now and its last six hours, from its series; null without a reading. */
+const cardOf = async (cmd: Command, name: string): Promise<EmsGpu> => {
+  const all = await readTail<GpuSample>(cmd.sys.vfs, cmd.access, seriesPath(instanceSeries('gpu', name)), READ_LIMIT).catch(() => []);
   const since = Date.now() - WINDOW_MS;
   const recent = all.filter((sample) => sample.at >= since);
   const now = recent[recent.length - 1]?.value;
-
-  const answer: EmsGpu = now
+  return now
     ? {
       ...now,
       vramPercent: percent(now.memUsedMb, now.memTotalMb),
@@ -52,18 +51,31 @@ const emsGpu = async (cmd: Command): CmdReturn => {
       vramSeries: points(recent, (entry) => percent(entry.memUsedMb, entry.memTotalMb)),
     }
     : null;
+};
+
+const emsGpu = async (cmd: Command): CmdReturn => {
+  const unknown: string[] = [];
+  const flags = parseArgs(cmd.args, { boolean: ['gauge'], string: ['instance'], unknown: collectUnknownFlags(unknown) });
+  if (await reportUnknownFlags(cmd, unknown)) return 1;
 
   if (flags.gauge) {
-    const gauges: Gauge[] = answer
-      ? [
-        { label: 'GPU', percent: answer.utilPct, value: `${Math.round(answer.utilPct)}%  ${answer.tempC}°C` },
-        { label: 'VRAM', percent: answer.vramPercent, value: `${(answer.memUsedMb / 1024).toFixed(1)}/${(answer.memTotalMb / 1024).toFixed(1)} GB` },
-      ]
-      : [];
+    const names = flags.instance ? [String(flags.instance)] : [PRIMARY, ...await otherInstanceNames(cmd)];
+    const gauges: Gauge[] = [];
+    for (const name of names) {
+      const card = await cardOf(cmd, name);
+      if (!card) continue;
+      const of = name === PRIMARY ? '' : ` ${name}`;
+      gauges.push(
+        { label: `GPU${of}`, percent: card.utilPct, value: `${Math.round(card.utilPct)}%  ${card.tempC}°C` },
+        { label: `VRAM${of}`, percent: card.vramPercent, value: `${(card.memUsedMb / 1024).toFixed(1)}/${(card.memTotalMb / 1024).toFixed(1)} GB` },
+      );
+    }
     if (cmd.json) await cmd.writeJSON(gauges);
     else for (const gauge of gauges) await cmd.writeLn(`${gauge.label} ${gauge.value}`);
     return 0;
   }
+
+  const answer = await cardOf(cmd, String(flags.instance || PRIMARY));
 
   if (cmd.json) {
     await cmd.writeJSON(answer satisfies EmsGpu);
@@ -77,12 +89,17 @@ const emsGpu = async (cmd: Command): CmdReturn => {
 emsGpu.spec = {
   name: 'ems-gpu',
   effect: 'read' as const,
-  description: "The media service's GPU now, with the last six hours of utilization and VRAM",
+  description: 'The GPU of an instance of the media service now, with the last six hours of utilization and VRAM',
   args: [],
   flags: [
-    { name: 'gauge', type: 'bool' as const, description: 'The GPU and VRAM gauges top draws beside the host (the gpu-sampler service declares it)' },
+    {
+      name: 'gauge',
+      type: 'bool' as const,
+      description: "The GPU and VRAM gauges top draws beside the host, each instance's with a card (the gpu-sampler service declares it)",
+    },
+    { name: 'instance', type: 'string' as const, description: 'The instance whose card (ems-instance list); main, the primary, by default' },
   ],
-  examples: ['ems-gpu', 'ems-gpu --gauge'],
+  examples: ['ems-gpu', 'ems-gpu --instance laptop', 'ems-gpu --gauge'],
   returns: 'utilPct, memUsedMb, memTotalMb, tempC, vramPercent and the utilization and VRAM series, or null when there is no reading.',
 };
 

@@ -2,17 +2,17 @@
  * GPU probe — EMS's `GET /v0/health`, or nothing.
  *
  * The card is EMS's: this process has no device and never looks for one. A
- * sample is the whole card as the media service reports it — utilization (and the video
- * decoder's and encoder's, when EMS reports them), memory and temperature, not what torch has
- * allocated — read from `CFG_EMS_URL` with `CFG_EMS_KEY` (`serviceKey`).
+ * sample is the whole card as an instance of the media service reports it — utilization (and the
+ * video decoder's and encoder's, when EMS reports them), memory and temperature, not what torch has
+ * allocated — read from the instance's address with its key.
  *
  * Absent-or-a-sample: no EMS address, an EMS that is not answering, or one whose
  * health carries no `util_pct` (it cannot see a card) returns undefined rather
  * than zeroes that look like an idle card.
  */
 
-import { serviceKey, type SettingsContext } from '@ein/client';
 import type { GpuSample } from '@ems/api';
+import type { EmsInstance } from './instances.ts';
 /** How long one health request may take — a probe runs every 15 s and must not pile up. */
 const EMS_TIMEOUT_MS = 5000;
 
@@ -55,14 +55,11 @@ export const gpuSampleFromHealth = (body: unknown): GpuSample | undefined => {
   };
 };
 
-/** One reading, asked of the EMS at `cmd.env.CFG_EMS_URL`. */
-export const sampleGpu = async (cmd: SettingsContext): Promise<GpuSample | undefined> => {
-  const base = cmd.env.CFG_EMS_URL?.replace(/\/+$/, '');
-  if (!base) return undefined;
+/** One reading, asked of `instance`. */
+export const sampleGpu = async (instance: EmsInstance): Promise<GpuSample | undefined> => {
   try {
-    const key = await serviceKey(cmd, 'CFG_EMS_KEY', 'CFG_EMS_URL');
-    const response = await fetch(`${base}/v0/health`, {
-      headers: key ? { authorization: `Bearer ${key}` } : {},
+    const response = await fetch(`${instance.url}/v0/health`, {
+      headers: instance.key ? { authorization: `Bearer ${instance.key}` } : {},
       signal: AbortSignal.timeout(EMS_TIMEOUT_MS),
     });
     if (!response.ok) {

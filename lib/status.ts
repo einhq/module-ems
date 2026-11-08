@@ -52,12 +52,13 @@ const familiesOf = (result: HealthResult): EmsFamily[] =>
     };
   });
 
-export const statusFromHealth = (result: HealthResult, url: string): Extract<EmsStatus, { running: true }> => {
+export const statusFromHealth = (result: HealthResult, url: string, instance?: string): Extract<EmsStatus, { running: true }> => {
   const loaded = Object.entries(result.models).map(([family, m]) => (m.device ? `${family}:${m.device}` : family));
   const gpu = result.gpu;
   return {
     running: true as const,
     url,
+    ...(instance ? { instance } : {}),
     api: result.api,
     ...(result.build ? { build: result.build } : {}),
     uptime: result.uptime,
@@ -121,26 +122,29 @@ export const statusFromHealth = (result: HealthResult, url: string): Extract<Ems
 };
 
 /**
- * What `health` asks about EMS (`ems-status --checks`, the `ems-link` service's `checkCommand`):
- * whether it answers and its model worker runs, each degradation, and the card. Nothing fails
- * while EMS merely restarts or is busy — the steps that need it wait — except a card the host is
- * meant to have and does not see, which a person has to put back.
+ * What `health` asks about one instance of EMS (`ems-status --checks`, the `ems-link` service's
+ * `checkCommand`): whether it answers and its model worker runs, each degradation, and the card.
+ * Nothing fails while EMS merely restarts or is busy — the steps that need it wait — except a card
+ * the host is meant to have and does not see, which a person has to put back. Another instance's
+ * checks carry its name (`ems laptop`, `ems laptop worker`); the primary's carry none.
  */
-export const checksOf = (status: EmsStatus): HealthCheck[] => {
+export const checksOf = (status: EmsStatus, other?: string): HealthCheck[] => {
+  const ems = other ? `ems ${other}` : 'ems';
   if (!status.running) {
-    return [{ name: 'ems', state: 'warn', reason: `${status.url} is not answering; work that needs it waits` }];
+    const waits = other ? 'its work goes to the other instances' : 'work that needs it waits';
+    return [{ name: ems, state: 'warn', reason: `${status.url} is not answering; ${waits}` }];
   }
   const build = status.build?.commit ? ` ${status.build.commit.slice(0, 7)}` : '';
-  const checks: HealthCheck[] = [{ name: 'ems', state: 'ok', reason: `EMS${build} answering, up ${age(status.uptime)}` }];
-  if (!status.worker.running) checks.push({ name: 'ems worker', state: 'warn', reason: 'the model worker is down; EMS starts it again' });
+  const checks: HealthCheck[] = [{ name: ems, state: 'ok', reason: `EMS${build} answering, up ${age(status.uptime)}` }];
+  if (!status.worker.running) checks.push({ name: `${ems} worker`, state: 'warn', reason: 'the model worker is down; EMS starts it again' });
   for (const d of status.degraded) {
     const since = d.since ? ` for ${age(Date.now() / 1000 - d.since)}` : '';
     const state = d.what === 'gpu' ? 'fail' : 'warn';
-    checks.push({ name: `ems ${d.what}`, state, reason: `${d.reason}${since}` });
+    checks.push({ name: `${ems} ${d.what}`, state, reason: `${d.reason}${since}` });
   }
   if (status.card && status.card.mode !== 'off') {
     const search = status.card.searchOnCard.length > 0 ? `, search on it: ${status.card.searchOnCard.join(', ')}` : '';
-    checks.push({ name: 'ems card', state: 'ok', reason: `${status.card.mode}${search}` });
+    checks.push({ name: `${ems} card`, state: 'ok', reason: `${status.card.mode}${search}` });
   }
   return checks;
 };

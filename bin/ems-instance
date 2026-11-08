@@ -1,0 +1,223 @@
+#!ts
+/**
+ * ems-instance — the media service's instances: the primary, `main`, which the media service
+ * settings are, and any number of others beside it, each on a machine of its own and serving the
+ * ops its `EMS_OPS` names. EiN gives each the kinds of work whose ops it serves and stamps as the
+ * primary does (`media-pool-kinds --instance`), with a pool worker per instance in the `models` and
+ * `media-worker` services.
+ *
+ * `list` says what EiN holds of each and asks it what it is now; `show` prints one, or one field of
+ * it, its slots resolved from its limits; `add`, `set` and `remove` change another instance's node,
+ * `/etc/ems.d/<name>`, which only the administrator reads since it holds the key. The primary is
+ * changed with `config set`.
+ */
+
+import { type CmdReturn, collectUnknownFlags, type Command, parseArgs, reportUnknownFlags, shq } from '@ein/client';
+import type { EmsCapabilities, EmsInstanceRow } from '@ems/api';
+import { capabilitiesOf } from '@ems/client';
+import { type EmsInstance, generationsDiffer, INSTANCE_NAME, type InstanceNode, INSTANCES_DIR, listInstances, PRIMARY, readInstance } from '@ems/instances';
+
+const ACTIONS = ['list', 'show', 'add', 'set', 'remove'];
+
+/** How long `list` waits for each instance's capabilities. */
+const WAIT_SECONDS = 5;
+
+/** A field `show` prints alone, and how. */
+const FIELDS = ['url', 'filesAddress', 'modelSlots', 'cpuSlots', 'answering', 'calls', 'ops'] as const;
+
+/** What EiN holds of `instance`, and what it says it is while it answers. */
+const rowOf = (instance: EmsInstance, capabilities: EmsCapabilities | null, primary: EmsCapabilities | null, primaryFiles: string | null): EmsInstanceRow => {
+  const differs = !instance.primary && capabilities && primary ? generationsDiffer(primary, capabilities, capabilities.ops ?? []) : [];
+  return {
+    name: instance.name,
+    primary: instance.primary,
+    url: instance.url,
+    filesAddress: instance.filesAddress ?? primaryFiles,
+    keySet: Boolean(instance.key),
+    modelSlots: instance.modelSlots ?? capabilities?.limits?.models ?? null,
+    cpuSlots: instance.cpuSlots ?? capabilities?.limits?.tools ?? null,
+    answering: capabilities !== null,
+    ...(capabilities
+      ? {
+        ...(capabilities.name ? { calls: capabilities.name } : {}),
+        ops: capabilities.ops ?? [],
+        ...(capabilities.gpu
+          ? {
+            gpu: {
+              present: capabilities.gpu.present,
+              ...(capabilities.gpu.name ? { name: capabilities.gpu.name } : {}),
+              ...(capabilities.gpu.memory_mb ? { memoryMb: capabilities.gpu.memory_mb } : {}),
+            },
+          }
+          : {}),
+        ...(capabilities.build ? { build: capabilities.build } : {}),
+        ...(differs.length ? { differs } : {}),
+      }
+      : {}),
+  };
+};
+
+/** Every instance's row, each asked at once. */
+const rows = async (cmd: Command, instances: EmsInstance[]): Promise<EmsInstanceRow[]> => {
+  const capabilities = await Promise.all(instances.map((instance) => capabilitiesOf(cmd, instance, WAIT_SECONDS)));
+  const primaryFiles = instances.find((instance) => instance.primary)?.filesAddress ?? null;
+  return instances.map((instance, i) => rowOf(instance, capabilities[i], capabilities[0], primaryFiles));
+};
+
+/** A line of `list` for a person: up or down, its card, the ops it serves, its build. */
+const line = (row: EmsInstanceRow): string => {
+  if (!row.answering) return `${row.name.padEnd(12)} down  ${row.url}`;
+  const card = row.gpu?.present ? row.gpu.name ?? 'a card' : 'CPU only';
+  const ops = row.primary || !row.ops ? '' : `  ${row.ops.join(' ')}`;
+  const build = row.build?.commit ? `  ${row.build.commit.slice(0, 7)}` : '';
+  return `${row.name.padEnd(12)} up    ${row.url}  ${card}${ops}${build}`;
+};
+
+const positive = (value: unknown, flag: string): number | undefined => {
+  if (value === undefined || value === '') return undefined;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < 1) throw new Error(`--${flag}: not a number of slots: ${value}`);
+  return n;
+};
+
+/** The node as `flags` change it: a flag given empty clears its field. */
+const changed = (node: Partial<InstanceNode>, flags: Record<string, unknown>): InstanceNode => {
+  const next: Record<string, unknown> = { ...node };
+  const text = (flag: string, field: keyof InstanceNode) => {
+    if (flags[flag] === undefined) return;
+    const value = String(flags[flag]).trim();
+    if (value) next[field] = value;
+    else delete next[field];
+  };
+  text('url', 'url');
+  text('key', 'key');
+  text('files-address', 'filesAddress');
+  for (const [flag, field] of [['model-slots', 'modelSlots'], ['cpu-slots', 'cpuSlots']] as const) {
+    if (flags[flag] === undefined) continue;
+    const slots = positive(flags[flag], flag);
+    if (slots === undefined) delete next[field];
+    else next[field] = slots;
+  }
+  if (typeof next.url !== 'string' || !/^https?:\/\/[^/\s]+/.test(next.url)) throw new Error(`--url: not an http address: ${next.url ?? '(none)'}`);
+  next.url = (next.url as string).replace(/\/+$/, '');
+  return next as InstanceNode;
+};
+
+/** Write an instance's node, made the administrator's alone the first time. */
+const writeNode = async (cmd: Command, name: string, node: InstanceNode): Promise<void> => {
+  const path = `${INSTANCES_DIR}/${name}`;
+  if (!await cmd.sys.vfs.exists(cmd.access, path)) {
+    const made = await cmd.execute(`mkdir -p ${INSTANCES_DIR} && mkfile ${shq(path)} && chmod 600 ${shq(path)}`);
+    if (made.code !== 0) throw new Error(`${path}: ${made.stderr.trim() || 'could not be made'}`);
+  }
+  const handle = await cmd.sys.vfs.open(cmd.access, path, { mode: 'w' });
+  try {
+    await handle.write(new TextEncoder().encode(`${JSON.stringify(node, null, 2)}\n`));
+  } finally {
+    await handle.close();
+  }
+};
+
+const emsInstance = async (cmd: Command): CmdReturn => {
+  const unknown: string[] = [];
+  const flags = parseArgs(cmd.args, {
+    string: ['url', 'key', 'files-address', 'model-slots', 'cpu-slots'],
+    boolean: ['names', 'others'],
+    unknown: collectUnknownFlags(unknown),
+  });
+  if (await reportUnknownFlags(cmd, unknown)) return 1;
+  const [action = 'list', name, field] = flags._.map(String);
+  if (!ACTIONS.includes(action)) {
+    await cmd.writeError(`ems-instance: expected ${ACTIONS.join(', ')}, not '${action}'\n`);
+    return 1;
+  }
+
+  try {
+    if (action === 'list') {
+      const instances = (await listInstances(cmd)).filter((instance) => !flags.others || !instance.primary);
+      if (flags.names) {
+        if (cmd.json) await cmd.writeJSON(instances.map((instance) => instance.name));
+        else if (instances.length) await cmd.writeLn(instances.map((instance) => instance.name).join(' '));
+        return 0;
+      }
+      const all = flags.others ? [await readInstance(cmd, PRIMARY) as EmsInstance, ...instances] : instances;
+      const answer = (await rows(cmd, all)).filter((row) => !flags.others || !row.primary) satisfies EmsInstanceRow[];
+      if (cmd.json) await cmd.writeJSON(answer);
+      else for (const row of answer) await cmd.writeLn(line(row));
+      return 0;
+    }
+
+    if (!name) throw new Error(`${action}: which instance?`);
+    if (action === 'show') {
+      const instance = await readInstance(cmd, name);
+      if (!instance) throw new Error(`no instance called ${name}`);
+      const primary = instance.primary ? instance : await readInstance(cmd, PRIMARY) as EmsInstance;
+      const [row] = (await rows(cmd, instance.primary ? [instance] : [primary, instance])).filter((row) => row.name === name);
+      if (field) {
+        if (!(FIELDS as readonly string[]).includes(field)) throw new Error(`show: no field ${field}; one of ${FIELDS.join(', ')}`);
+        const value = row[field as typeof FIELDS[number]];
+        if (cmd.json) await cmd.writeJSON(value ?? null);
+        else if (value !== undefined && value !== null) await cmd.writeLn(Array.isArray(value) ? value.join(' ') : String(value));
+        return 0;
+      }
+      if (cmd.json) await cmd.writeJSON(row satisfies EmsInstanceRow);
+      else for (const [key, value] of Object.entries(row)) await cmd.writeLn(`${key}  ${typeof value === 'object' ? JSON.stringify(value) : value}`);
+      return 0;
+    }
+
+    if (name === PRIMARY) throw new Error(`${PRIMARY} is the media service settings: change it with config set CFG_EMS_URL, CFG_EMS_KEY or CFG_EMS_FILES_ADDRESS`);
+    if (!INSTANCE_NAME.test(name)) throw new Error(`${name}: a name is lower case letters, digits and dashes`);
+    const existing = await readInstance(cmd, name);
+    if (action === 'remove') {
+      if (!existing) throw new Error(`no instance called ${name}`);
+      const removed = await cmd.execute(`rm ${shq(`${INSTANCES_DIR}/${name}`)}`);
+      if (removed.code !== 0) throw new Error(removed.stderr.trim() || `${name}: could not be removed`);
+    } else {
+      if (action === 'add' && existing) throw new Error(`${name} exists: change it with set`);
+      if (action === 'set' && !existing) throw new Error(`no instance called ${name}: make it with add`);
+      const { name: _name, primary: _primary, ...node } = existing ?? { name, primary: false };
+      const next = changed(node, flags);
+      const taken = (await listInstances(cmd)).find((other) => other.name !== name && other.url === next.url);
+      if (taken) throw new Error(`${next.url} is ${taken.name} already`);
+      await writeNode(cmd, name, next);
+    }
+    if (cmd.json) await cmd.writeJSON({ ok: true });
+    else await cmd.writeLn(`${action === 'remove' ? 'Removed' : action === 'add' ? 'Added' : 'Changed'} ${name}`);
+    return 0;
+  } catch (error) {
+    await cmd.writeError(`ems-instance: ${error instanceof Error ? error.message : String(error)}\n`);
+    return 1;
+  }
+};
+
+emsInstance.spec = {
+  name: 'ems-instance',
+  admin: true,
+  effect: 'read' as const,
+  description: "The media service's instances: list them and what each serves, or add, change or remove one beside the primary",
+  args: [
+    { name: 'action', type: 'choice' as const, choices: ACTIONS, writes: ['add', 'set', 'remove'], description: 'list (the default), show, add, set or remove' },
+    { name: 'name', type: 'string' as const, description: 'show, add, set, remove: the instance; main is the primary' },
+    { name: 'field', type: 'string' as const, description: `show: print this field alone (${FIELDS.join(', ')})` },
+  ],
+  flags: [
+    { name: 'url', type: 'string' as const, description: 'add, set: where the instance answers, http://host:port' },
+    { name: 'key', type: 'string' as const, description: 'add, set: the bearer key the instance expects; empty for none' },
+    { name: 'files-address', type: 'string' as const, description: "add, set: host:port of ems-files as the instance reaches it; empty for the primary's" },
+    { name: 'model-slots', type: 'string' as const, description: 'add, set: model requests kept in flight against it; empty for its own limit' },
+    { name: 'cpu-slots', type: 'string' as const, description: 'add, set: tool requests kept in flight against it; empty for its own limit' },
+    { name: 'names', type: 'bool' as const, description: 'list: the names alone, without asking any instance' },
+    { name: 'others', type: 'bool' as const, description: 'list: leave out the primary' },
+  ],
+  examples: [
+    'ems-instance list',
+    'ems-instance add laptop --url http://192.168.1.20:8181 --key let-me-in --files-address 192.168.1.10:2224',
+    'ems-instance show laptop modelSlots',
+    'ems-instance set laptop --cpu-slots 2',
+    'ems-instance remove laptop',
+  ],
+  returns:
+    'list: each instance with its address, files address, slots and whether a key is set, and while it answers its own name, ops, card and build. show: one, or one field of it.',
+};
+
+export default emsInstance;

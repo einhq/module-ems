@@ -43,6 +43,18 @@ Deno.test({
       assertEquals(gpu?.utilSeries.map((point) => point.value), [10, 80]);
       assertEquals(gpu?.vramSeries.map((point) => point.value), [6.25, 50]);
     });
+
+    await t.step("another instance's card is its own series, and its gauges carry its name", async () => {
+      await cmd.shouldSucceed([
+        'mkdir -p /etc/ems.d && mkfile /etc/ems.d/laptop && echo \'{"url":"http://127.0.0.1:1"}\' > /etc/ems.d/laptop',
+        `mklog -r '7 day' "$LOGS_PATH/metrics/gpu-laptop"`,
+        `echo '{"utilPct":30,"memUsedMb":2000,"memTotalMb":8000,"tempC":50}' >> "$LOGS_PATH/metrics/gpu-laptop"`,
+      ].join('\n'));
+      assertEquals((await client.execJson<EmsGpu>('ems-gpu --instance laptop'))?.vramPercent, 25);
+      assertEquals((await client.execJson<EmsGpu>('ems-gpu'))?.utilPct, 80);
+      const gauges = await client.execJson<{ label: string }[]>('ems-gpu --gauge');
+      assertEquals(gauges.map((gauge) => gauge.label), ['GPU', 'VRAM', 'GPU laptop', 'VRAM laptop']);
+    });
   } finally {
     client.close();
     await testCtx.teardown();

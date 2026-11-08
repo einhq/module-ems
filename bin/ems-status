@@ -13,28 +13,45 @@
  * op — what the system dashboard's media service tab draws.
  *
  * `--brief` prints one line and is what `service-list --detail` shows beside the `ems-link` service.
- * `--checks` answers `health`'s checks (the `ems-link` service's `checkCommand`): whether EMS
- * answers and its model worker runs, each degradation, and the card. None fails while EMS merely
- * restarts or is busy — the steps that need it wait — except a card the host should have and does
- * not see, which a person has to put back.
+ * `--checks` answers `health`'s checks (the `ems-link` service's `checkCommand`) for every instance,
+ * or the one `--instance` names: whether EMS answers and its model worker runs, each degradation,
+ * and the card. None fails while EMS merely restarts or is busy — the steps that need it wait —
+ * except a card the host should have and does not see, which a person has to put back.
+ *
+ * Every other answer is about the primary, or the instance `--instance` names.
  */
-import type { CmdReturn, Command } from '@ein/client';
+import type { CmdReturn, Command, HealthCheck } from '@ein/client';
 import { parseArgs } from '@ein/client';
 import type { EmsStatus } from '@ems/api';
 import { health } from '@ems/client';
+import { type EmsInstance, listInstances, PRIMARY, readInstance } from '@ems/instances';
 import { age, checksOf, statusFromHealth } from '@ems/status';
 
+/** One instance's status, answering or not. */
+const statusOf = async (cmd: Command, instance: EmsInstance): Promise<EmsStatus> => {
+  const result = await health(cmd, instance);
+  return result ? statusFromHealth(result, instance.url, instance.name) : { running: false, url: instance.url, instance: instance.name };
+};
+
 const emsStatus = async (cmd: Command): CmdReturn => {
-  const flags = parseArgs(cmd.args, { boolean: ['brief', 'checks', 'card'] });
-  const result = await health(cmd);
-  const url = cmd.env.CFG_EMS_URL || 'http://127.0.0.1:8181';
+  const flags = parseArgs(cmd.args, { boolean: ['brief', 'checks', 'card'], string: ['instance'] });
+  const name = typeof flags.instance === 'string' && flags.instance ? flags.instance : undefined;
+  const instance = await readInstance(cmd, name ?? PRIMARY);
+  if (!instance) {
+    await cmd.writeError(`ems-status: no instance called ${name}\n`);
+    return 1;
+  }
 
   if (flags.checks) {
-    const checks = checksOf(result ? statusFromHealth(result, url) : { running: false, url });
+    const instances = name ? [instance] : await listInstances(cmd);
+    const checks: HealthCheck[] = (await Promise.all(instances.map(async (each) => checksOf(await statusOf(cmd, each), each.primary ? undefined : each.name)))).flat();
     if (cmd.json) await cmd.writeJSON(checks);
     else for (const check of checks) await cmd.writeLn(`${check.state.padEnd(5)} ${check.name}  ${check.reason}`);
     return 0;
   }
+
+  const result = await health(cmd, instance);
+  const url = instance.url;
 
   // The card's mode alone, for whatever shares the card and follows it: nothing when EMS cannot say.
   if (flags.card) {
@@ -46,7 +63,7 @@ const emsStatus = async (cmd: Command): CmdReturn => {
 
   if (!result) {
     if (cmd.json) {
-      await cmd.writeJSON({ running: false, url } satisfies EmsStatus);
+      await cmd.writeJSON({ running: false, url, instance: instance.name } satisfies EmsStatus);
     } else if (flags.brief) {
       await cmd.writeLn('not answering');
     } else {
@@ -55,7 +72,7 @@ const emsStatus = async (cmd: Command): CmdReturn => {
     return 1;
   }
 
-  const status = statusFromHealth(result, url);
+  const status = statusFromHealth(result, url, instance.name);
 
   if (cmd.json) {
     await cmd.writeJSON(status satisfies EmsStatus);
@@ -97,6 +114,7 @@ emsStatus.spec = {
     { name: 'brief', type: 'bool' as const, description: 'One line, degradation first (used by service-list --detail)' },
     { name: 'checks', type: 'bool' as const, description: 'The checks health reads: answering, model worker, degradations, card' },
     { name: 'card', type: 'bool' as const, description: "The card's mode alone: quiet, busy, switching or off; fails when EMS cannot say" },
+    { name: 'instance', type: 'string' as const, description: 'The instance to ask (ems-instance list); main, the primary, by default, and for --checks every one' },
   ],
 };
 

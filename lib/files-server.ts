@@ -24,7 +24,7 @@ type FilesServerOptions = {
   port: number;
   /** `host:port` as EMS reaches this server; a port of its own when the listener is behind a mapping. */
   address: string;
-  /** The media service the names are for. */
+  /** The media service the names are for; `publish` adds others. */
   emsUrl: string;
   /** Whether connections are TLS, each side pinning the other's certificate, rather than plain. */
   tls?: boolean;
@@ -164,7 +164,9 @@ class SessionThread {
 export class FilesServer {
   private listener?: Worker;
   private sessions: SessionThread[] = [];
-  private endpoint?: FilesEndpoint;
+  private credentials?: Pick<FilesEndpoint, 'secret' | 'tls'>;
+  /** The endpoints this server published, by the media service each is for. */
+  private published = new Map<string, FilesEndpoint>();
   private listening?: PromiseWithResolvers<number>;
   private stopped?: PromiseWithResolvers<void>;
   private failure = Promise.withResolvers<Error>();
@@ -199,9 +201,30 @@ export class FilesServer {
     // The first session thread starts with the listener, so the first connection does not wait for one.
     this.more();
     const port = await this.listening.promise;
-    this.endpoint = { address: this.options.address, emsUrl: this.options.emsUrl, ...credentials };
-    filesState().endpoints.set(this.options.emsUrl, this.endpoint);
+    this.credentials = credentials;
+    this.publish([{ emsUrl: this.options.emsUrl, address: this.options.address }]);
     return port;
+  }
+
+  /**
+   * Serve the requests to each of `targets`, each media service reaching this server at its own
+   * address, and no longer those to a service this server published before and `targets` leaves out.
+   */
+  publish(targets: { emsUrl: string; address: string }[]): void {
+    if (!this.credentials) return;
+    const { endpoints } = filesState();
+    const wanted = new Map(targets.map((target) => [target.emsUrl, target.address]));
+    for (const [emsUrl, endpoint] of this.published) {
+      if (wanted.get(emsUrl) === endpoint.address) continue;
+      if (endpoints.get(emsUrl) === endpoint) endpoints.delete(emsUrl);
+      this.published.delete(emsUrl);
+    }
+    for (const [emsUrl, address] of wanted) {
+      if (this.published.has(emsUrl)) continue;
+      const endpoint = { address, emsUrl, ...this.credentials };
+      this.published.set(emsUrl, endpoint);
+      endpoints.set(emsUrl, endpoint);
+    }
   }
 
   async stop(): Promise<void> {
@@ -244,8 +267,7 @@ export class FilesServer {
   }
 
   private unpublish(): void {
-    const { endpoints } = filesState();
-    if (this.endpoint && endpoints.get(this.options.emsUrl) === this.endpoint) endpoints.delete(this.options.emsUrl);
+    this.publish([]);
   }
 
   private end(): void {

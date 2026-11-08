@@ -1,8 +1,9 @@
 /**
  * Client for EMS (API v0) — the media service that holds every model and media tool EiN uses.
  *
- * HTTP/1.1 + JSON on `CFG_EMS_URL`, with the bearer key `CFG_EMS_KEY` when that is the system's own
- * EMS — the key is in no shell's environment and goes nowhere else. Every op takes the VFS path
+ * HTTP/1.1 + JSON on the instance the command calls (instances.ts): the primary at `CFG_EMS_URL`,
+ * with the bearer key `CFG_EMS_KEY` when that is the system's own EMS — the key is in no shell's
+ * environment and goes nowhere else — or the one `CFG_EMS_INSTANCE` names. Every op takes the VFS path
  * of a file, which the request names by a name of its own in a directory `ems-files` serves EMS
  * for as long as the request runs (files.ts): EMS has no files of its own and reaches the request's
  * through that endpoint. With `CFG_EMS_FILES_ADDRESS` empty, or the service not serving yet, no
@@ -16,11 +17,11 @@
  */
 
 import type { Command } from '@ein/client';
-import type { EmsDegradation } from '@ems/api';
-import { serviceKey, STEP_EXIT_INPUT, STEP_EXIT_TEMPORARY } from '@ein/client';
+import type { EmsCapabilities, EmsDegradation } from '@ems/api';
+import { STEP_EXIT_INPUT, STEP_EXIT_TEMPORARY } from '@ein/client';
 import { forRequest } from './files.ts';
+import { type EmsInstance, instanceName, otherInstanceNames, primaryInstance, readInstance, sameGenerations } from './instances.ts';
 
-const DEFAULT_URL = 'http://127.0.0.1:8181';
 const API_MAJOR = 'v0';
 
 const INTERRUPT_POLL_MS = 500;
@@ -34,6 +35,9 @@ const INTERRUPT_POLL_MS = 500;
 // test points them at a stub (test/environment.json).
 const DEFAULT_CONNECT_RETRY_SECONDS = 90;
 const CONNECT_RETRY_MS = 5000;
+// A second instance gets one retry: the work it gives back goes to another instance at once
+// (`pipeline-worker --pass-on`), where waiting out a restart would hold it.
+const OTHER_CONNECT_RETRY_SECONDS = 5;
 
 /** A box in fractions of the display frame, origin top-left. */
 export type Box = { x: number; y: number; width: number; height: number };
@@ -235,6 +239,9 @@ export class EmsError extends Error {
 /** EMS could not be reached, did not answer in time, or answered with nothing usable. */
 export class EmsUnavailableError extends Error {}
 
+/** The caller stopped waiting: its own timeout, or the command was interrupted. Asking another instance would only wait again. */
+class EmsGaveUpError extends EmsUnavailableError {}
+
 /**
  * The EMS asked does not serve the op: `op_not_served` (its `EMS_OPS` leaves it out), or no route
  * for it at all. A fact about that instance, not the file, so it counts as EMS being away: another
@@ -279,14 +286,25 @@ type CallOptions = {
   stream?: boolean;
 };
 
-/** The media service `cmd` talks to, without a trailing slash. */
-export const emsUrl = (cmd: Command): string => (cmd.env.CFG_EMS_URL || DEFAULT_URL).replace(/\/+$/, '');
-
-/** A request's headers, with EMS's key when the request goes to the system's own EMS (`serviceKey`). */
-const headers = async (cmd: Command): Promise<Record<string, string>> => {
-  const key = await serviceKey(cmd, 'CFG_EMS_KEY', 'CFG_EMS_URL');
-  return { 'content-type': 'application/json', ...(key ? { authorization: `Bearer ${key}` } : {}) };
+/**
+ * The instance `cmd` calls: the one `CFG_EMS_INSTANCE` names, or the primary. A name with no
+ * instance behind it is EMS being away, so the step waits rather than failing.
+ */
+export const emsInstance = async (cmd: Pick<Command, 'sys' | 'env'>): Promise<EmsInstance> => {
+  const name = instanceName(cmd);
+  const instance = await readInstance(cmd, name);
+  if (!instance) throw new EmsUnavailableError(`ems: no instance called ${name}`);
+  return instance;
 };
+
+/** A request's headers, with the instance's key when it has one. */
+const headers = (instance: EmsInstance): Record<string, string> => ({
+  'content-type': 'application/json',
+  ...(instance.key ? { authorization: `Bearer ${instance.key}` } : {}),
+});
+
+/** `ems` for the primary and `ems <name>` for another, as messages name the one that answered. */
+const who = (instance: EmsInstance): string => instance.primary ? 'ems' : `ems ${instance.name}`;
 
 /** A failure to reach EMS at all — before any byte of a request was answered. */
 class ConnectError extends Error {}
@@ -314,8 +332,8 @@ const fetchOnce = async (cmd: Command, op: string, url: string, init: RequestIni
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } catch (error) {
-    if (why === 'timeout') throw new EmsUnavailableError(`ems: ${op} timed out after ${waitMs! / 1000}s`);
-    if (why === 'interrupted') throw new EmsUnavailableError(`ems: ${op} interrupted`);
+    if (why === 'timeout') throw new EmsGaveUpError(`ems: ${op} timed out after ${waitMs! / 1000}s`);
+    if (why === 'interrupted') throw new EmsGaveUpError(`ems: ${op} interrupted`);
     throw new ConnectError(error instanceof Error ? error.message : String(error));
   } finally {
     clearTimeout(timer);
@@ -323,17 +341,18 @@ const fetchOnce = async (cmd: Command, op: string, url: string, init: RequestIni
   }
 };
 
-const connectRetryMs = (cmd: Command): number => {
+const connectRetryMs = (cmd: Command, instance: EmsInstance): number => {
   const seconds = parseFloat(cmd.env.CFG_EMS_CONNECT_RETRY || '');
-  return (Number.isFinite(seconds) && seconds >= 0 ? seconds : DEFAULT_CONNECT_RETRY_SECONDS) * 1000;
+  const patience = Number.isFinite(seconds) && seconds >= 0 ? seconds : DEFAULT_CONNECT_RETRY_SECONDS;
+  return (instance.primary ? patience : Math.min(patience, OTHER_CONNECT_RETRY_SECONDS)) * 1000;
 };
 
 /**
  * `fetchOnce`, retrying a refused connection for a while — see DEFAULT_CONNECT_RETRY_SECONDS.
  * The retry budget is separate from `waitMs`, which bounds one answered request.
  */
-const fetchInterruptible = async (cmd: Command, op: string, url: string, init: RequestInit, waitMs: number | undefined, patient: boolean): Promise<Response> => {
-  const deadline = Date.now() + (patient ? connectRetryMs(cmd) : 0);
+const fetchInterruptible = async (cmd: Command, op: string, url: string, init: RequestInit, waitMs: number | undefined, patienceMs: number): Promise<Response> => {
+  const deadline = Date.now() + patienceMs;
   let attempt = 0;
   while (true) {
     try {
@@ -400,13 +419,15 @@ const streamedEnvelope = async (cmd: Command, response: Response, onProgress: Ca
 };
 
 /**
- * One op. Every failure is one of the two error classes; a `busy`/loading EMS counts as absent.
+ * One op on one instance. Every failure is one of the two error classes; a `busy`/loading EMS
+ * counts as absent.
  *
  * A request waits for its answer however long EMS takes, unless the caller names its own
  * patience (`timeoutSeconds`). Only a caller a person is waiting on does: batch work that is
  * slow is working, and giving up on it only means doing it again (ein/core#358).
  */
-const request = async (cmd: Command, op: string, body: Record<string, unknown>, opts: CallOptions = {}): Promise<Answer> => {
+const requestOn = async (cmd: Command, instance: EmsInstance, op: string, body: Record<string, unknown>, opts: CallOptions): Promise<Answer> => {
+  const ems = who(instance);
   const waitMs = opts.timeoutSeconds === undefined ? undefined : opts.timeoutSeconds * 1000;
   const options: Record<string, unknown> = {};
   if (opts.priority === 'interactive') options.priority = 'interactive';
@@ -418,10 +439,10 @@ const request = async (cmd: Command, op: string, body: Record<string, unknown>, 
   // EMS reaches the request's files through ems-files for as long as the answer takes, and sends
   // back what it wrote before it answers; while the service does not serve (it restarts, or
   // CFG_EMS_FILES_ADDRESS is empty), EMS could open none of them, so the request waits.
-  const files = await forRequest(cmd, emsUrl(cmd), payload);
+  const files = await forRequest(cmd, instance.url, payload);
   if (!files) {
     const why = cmd.env.CFG_EMS_FILES_ADDRESS ? 'ems-files is not serving' : 'CFG_EMS_FILES_ADDRESS is empty';
-    throw new EmsUnavailableError(`ems: ${op}: ${why}`);
+    throw new EmsUnavailableError(`${ems}: ${op}: ${why}`);
   }
 
   let response: Response;
@@ -430,20 +451,20 @@ const request = async (cmd: Command, op: string, body: Record<string, unknown>, 
     response = await fetchInterruptible(
       cmd,
       op,
-      `${emsUrl(cmd)}/${API_MAJOR}/${op.replace('.', '/')}`,
+      `${instance.url}/${API_MAJOR}/${op.replace('.', '/')}`,
       {
         method: 'POST',
-        headers: { ...await headers(cmd), ...files.headers, ...(stream ? { accept: 'text/event-stream' } : {}) },
+        headers: { ...headers(instance), ...files.headers, ...(stream ? { accept: 'text/event-stream' } : {}) },
         body: JSON.stringify(files.body),
       },
       waitMs,
-      opts.priority !== 'interactive',
+      opts.priority === 'interactive' ? 0 : connectRetryMs(cmd, instance),
     );
     try {
       envelope = stream ? await streamedEnvelope(cmd, response, opts.onProgress) : await response.json() as Envelope;
     } catch (error) {
       if (error instanceof EmsUnavailableError) throw error;
-      throw new EmsUnavailableError(`ems: ${op} answered ${response.status} with no usable body`);
+      throw new EmsUnavailableError(`${ems}: ${op} answered ${response.status} with no usable body`);
     }
   } finally {
     void files.release();
@@ -453,13 +474,52 @@ const request = async (cmd: Command, op: string, body: Record<string, unknown>, 
     const message = envelope.error?.message ?? `HTTP ${response.status}`;
     // A full queue, a worker still loading or a file endpoint EMS could not reach is, for a caller,
     // the same as no EMS at all: the step fails now and the pool tries again later.
-    if (code === 'busy' || code === 'model_unavailable' || code === 'files_unavailable') throw new EmsUnavailableError(`ems: ${op} ${message} (${code})`);
+    if (code === 'busy' || code === 'model_unavailable' || code === 'files_unavailable') throw new EmsUnavailableError(`${ems}: ${op} ${message} (${code})`);
     // An EMS that predates EMS_OPS has no route for an op it lacks, and answers 404 without an envelope.
-    if (code === 'op_not_served' || code === 'http_404') throw new EmsNotServedError(`ems: ${op} ${message} (${code})`);
+    if (code === 'op_not_served' || code === 'http_404') throw new EmsNotServedError(`${ems}: ${op} ${message} (${code})`);
+    // What a second instance refuses within its own budget, the primary may not: only the
+    // primary's refusal is the source's (`generations`' `cpuBudget` is the primary's).
+    if (code === 'refused' && !instance.primary) throw new EmsUnavailableError(`${ems}: ${op} ${message} (${code})`);
     throw new EmsError(op, code, message, envelope.error?.permanent === true, response.status);
   }
   return { result: envelope.result, meta: envelope.meta };
 };
+
+/**
+ * One op, on the instance the command calls. A search someone waits on (`interactive`) that the
+ * primary cannot answer goes to the first other instance that serves the op and stamps it as the
+ * primary does, so a query's vector is comparable with the stored ones.
+ */
+const request = async (cmd: Command, op: string, body: Record<string, unknown>, opts: CallOptions = {}): Promise<Answer> => {
+  const instance = await emsInstance(cmd);
+  try {
+    return await requestOn(cmd, instance, op, body, opts);
+  } catch (error) {
+    if (opts.priority !== 'interactive' || !instance.primary || !(error instanceof EmsUnavailableError) || error instanceof EmsGaveUpError) throw error;
+    const other = await standIn(cmd, op);
+    if (!other) throw error;
+    return await requestOn(cmd, other, op, body, opts);
+  }
+};
+
+/**
+ * The first other instance that answers, serves `op` and stamps it as the primary did when it last
+ * said: none when there is no other, or the primary has not answered since this process started.
+ */
+const standIn = async (cmd: Command, op: string): Promise<EmsInstance | undefined> => {
+  const primary = lastPrimaryCapabilities();
+  if (!primary) return undefined;
+  for (const name of await otherInstanceNames(cmd)) {
+    const instance = await readInstance(cmd, name);
+    if (!instance) continue;
+    const capabilities = await capabilitiesOf(cmd, instance, STAND_IN_WAIT_SECONDS);
+    if (capabilities && sameGenerations(primary, capabilities, [op])) return instance;
+  }
+  return undefined;
+};
+
+/** How long a stand-in's capabilities may take: a person is waiting. */
+const STAND_IN_WAIT_SECONDS = 2;
 
 const call = async (cmd: Command, op: string, body: Record<string, unknown>, opts: CallOptions = {}): Promise<unknown> => (await request(cmd, op, body, opts)).result;
 
@@ -1124,14 +1184,27 @@ export const extractText = async (cmd: Command, path: string, mimetype: string):
   return { text: result.text, pages: result.pages, method: result.method, wordCount: result.word_count };
 };
 
-const get = async (cmd: Command, path: string, waitSeconds = 5): Promise<unknown | null> => {
+const getOn = async (cmd: Command, instance: EmsInstance, path: string, waitSeconds = 5): Promise<unknown | null> => {
   try {
-    const response = await fetchInterruptible(cmd, path, `${emsUrl(cmd)}/${API_MAJOR}/${path}`, { headers: await headers(cmd) }, waitSeconds * 1000, false);
+    const response = await fetchInterruptible(cmd, path, `${instance.url}/${API_MAJOR}/${path}`, { headers: headers(instance) }, waitSeconds * 1000, 0);
     if (!response.ok) return null;
     return await response.json();
   } catch {
     return null;
   }
+};
+
+const PRIMARY_CAPABILITIES = Symbol.for('ein.ems.primary-capabilities');
+
+/** The primary's capabilities as it last gave them in this process, for a stand-in to match. */
+const lastPrimaryCapabilities = (): EmsCapabilities | undefined => (globalThis as unknown as Record<symbol, EmsCapabilities | undefined>)[PRIMARY_CAPABILITIES];
+
+/** An instance's capabilities, or null when it is not answering. */
+export const capabilitiesOf = async (cmd: Command, instance: EmsInstance, waitSeconds?: number): Promise<EmsCapabilities | null> => {
+  const answer = await getOn(cmd, instance, 'capabilities', waitSeconds);
+  if (!answer || typeof answer !== 'object') return null;
+  if (instance.primary) (globalThis as unknown as Record<symbol, EmsCapabilities>)[PRIMARY_CAPABILITIES] = answer as EmsCapabilities;
+  return answer as EmsCapabilities;
 };
 
 /**
@@ -1159,19 +1232,15 @@ type Generations = {
 };
 
 /**
- * Everything EMS stamps its results with now, from one `capabilities` request, or null when EMS is
- * not answering. Null is not "none of them": a caller comparing stored results with these cannot
- * tell which are stale, where a null field says EMS runs no such thing. A batch caller passes a
- * longer wait: capabilities asks the model worker, which answers slowly while it loads its models.
+ * Everything EMS stamps its results with now, from one `capabilities` request to the primary,
+ * whichever instance the command calls, or null when the primary is not answering. Null is not
+ * "none of them": a caller comparing stored results with these cannot tell which are stale, where a
+ * null field says EMS runs no such thing. A batch caller passes a longer wait: capabilities asks the
+ * model worker, which answers slowly while it loads its models.
  */
 export const generations = async (cmd: Command, waitSeconds?: number): Promise<Generations | null> => {
-  const capabilities = await get(cmd, 'capabilities', waitSeconds) as {
-    signatures?: { transcribe?: unknown };
-    encode?: { cpu_budget?: unknown };
-    models?: { image_embed?: unknown; faces?: unknown; ocr?: unknown; text_embed?: unknown };
-    ops?: unknown;
-  } | null;
-  if (!capabilities || typeof capabilities !== 'object') return null;
+  const capabilities = await capabilitiesOf(cmd, await primaryInstance(cmd), waitSeconds);
+  if (!capabilities) return null;
 
   const named = (value: unknown): string | null => typeof value === 'string' && value ? value : null;
   const ops = Array.isArray(capabilities.ops) ? capabilities.ops : [];
@@ -1188,8 +1257,10 @@ export const generations = async (cmd: Command, waitSeconds?: number): Promise<G
   };
 };
 
-/** EMS health, or null when it is not answering. */
-export const health = async (cmd: Command): Promise<HealthResult | null> => {
-  const result = await get(cmd, 'health');
+/** The health of `instance`, by default the one the command calls, or null when it is not answering. */
+export const health = async (cmd: Command, instance?: EmsInstance): Promise<HealthResult | null> => {
+  const target = instance ?? await readInstance(cmd, instanceName(cmd));
+  if (!target) return null;
+  const result = await getOn(cmd, target, 'health');
   return result && typeof result === 'object' && (result as HealthResult).ok ? result as HealthResult : null;
 };

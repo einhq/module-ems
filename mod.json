@@ -7,6 +7,7 @@
   "exports": {
     "./api": "./lib/api.ts",
     "./client": "./lib/client.ts",
+    "./instances": "./lib/instances.ts",
     "./testing": "./test/stub-ems.ts",
     "./text-embedding": "./lib/text-embedding.ts"
   },

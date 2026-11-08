@@ -15,6 +15,8 @@ import {
   activeSpeakers,
   detectFaces,
   detectVideoFaces,
+  embedImage,
+  embedImageText,
   embedTexts,
   EmsError,
   EmsNotServedError,
@@ -25,6 +27,7 @@ import {
   health,
   isFileFault,
   stepExitCode,
+  transcodeVideo,
   transcribe,
   voiceprint,
 } from '../lib/client.ts';
@@ -383,5 +386,82 @@ Deno.test('the face models are the ones capabilities names, and none without fac
   } finally {
     await running.close();
     await without.close();
+  }
+});
+
+/** A Command whose VFS holds instance nodes under `/etc/ems.d`, by name. */
+const withInstances = (env: Record<string, string>, nodes: Record<string, Record<string, unknown>>) => {
+  const { cmd } = makeCmd(env);
+  const at = (path: string) => nodes[path.replace('/etc/ems.d/', '')];
+  (cmd as unknown as { sys: { vfs: Record<string, unknown> } }).sys.vfs = {
+    stat: () => Promise.reject(new Error('not a node')),
+    children: (_access: unknown, path: string) =>
+      path === '/etc/ems.d' ? Promise.resolve(Object.keys(nodes).map((name) => ({ name }))) : Promise.reject(new Error('not a node')),
+    open: (_access: unknown, path: string) => {
+      const node = at(path);
+      if (!node) return Promise.reject(new Error('not a node'));
+      return Promise.resolve({ readable: new Response(JSON.stringify(node)).body, close: () => Promise.resolve() });
+    },
+  };
+  return cmd;
+};
+
+Deno.test("a command calls the instance CFG_EMS_INSTANCE names, with its key, and the generations stay the primary's", async () => {
+  const primary = startStubEms({ capabilities: { ops: ['vision.embed'], models: { image_embed: 'siglip2' } } });
+  const laptop = startStubEms({
+    ops: { 'vision.embed': { result: { embedding: [1], dimension: 1 }, producer: 'siglip2' } },
+    capabilities: { ops: ['vision.embed'], models: { image_embed: 'other' } },
+  });
+  try {
+    const cmd = withInstances({ CFG_EMS_URL: primary.url, CFG_EMS_INSTANCE: 'laptop' }, { laptop: { url: `${laptop.url}/`, key: 'laptop-key' } });
+    assertEquals((await embedImage(cmd, '/f/a.jpg')).embedding, [1]);
+    assertEquals(laptop.requests.map((r) => [r.op, r.authorization]), [['vision.embed', 'Bearer laptop-key']]);
+    assertEquals(primary.requests.length, 0);
+    assertEquals((await generations(cmd))?.imageEmbed, 'siglip2');
+
+    const nobody = withInstances({ CFG_EMS_URL: primary.url, CFG_EMS_INSTANCE: 'desktop' }, {});
+    await assertRejects(() => embedImage(nobody, '/f/a.jpg'), EmsUnavailableError, 'no instance called desktop');
+  } finally {
+    await primary.close();
+    await laptop.close();
+  }
+});
+
+Deno.test("a second instance's refusal is not the source's: the work goes back for another", async () => {
+  const laptop = startStubEms({ ops: { 'video.transcode': { error: { code: 'refused', message: 'over the CPU budget', permanent: true }, status: 422 } } });
+  try {
+    const cmd = withInstances({ CFG_EMS_INSTANCE: 'laptop' }, { laptop: { url: laptop.url } });
+    const error = await assertRejects(() => transcodeVideo(cmd, '/f/a.mov', { output: '/f/a.mp4' }), EmsUnavailableError, 'refused');
+    assertEquals(stepExitCode(error), STEP_EXIT_TEMPORARY);
+  } finally {
+    await laptop.close();
+  }
+});
+
+Deno.test('a search the primary cannot answer goes to an instance that stamps its op the same, and to no other', async () => {
+  const primary = startStubEms({
+    ops: { 'vision.embed_text': { error: { code: 'model_unavailable', message: 'loading', permanent: false }, status: 503 } },
+    capabilities: { ops: ['vision.embed_text'], models: { image_embed: 'siglip2' } },
+  });
+  const same = startStubEms({
+    ops: { 'vision.embed_text': { result: { embedding: [3] }, producer: 'siglip2' } },
+    capabilities: { ops: ['vision.embed_text'], models: { image_embed: 'siglip2' } },
+  });
+  const other = startStubEms({
+    ops: { 'vision.embed_text': { result: { embedding: [9] }, producer: 'clip' } },
+    capabilities: { ops: ['vision.embed_text'], models: { image_embed: 'clip' } },
+  });
+  try {
+    const cmd = withInstances({ CFG_EMS_URL: primary.url }, { a: { url: other.url }, b: { url: same.url } });
+    // What the primary stamps with is learned while it answers.
+    await generations(cmd);
+    assertEquals((await embedImageText(cmd, 'a sailboat', { interactive: true })).embedding, [3]);
+    assertEquals(other.requests.length, 0);
+    // Batch work waits for the primary instead.
+    await assertRejects(() => embedImageText(cmd, 'a sailboat'), EmsUnavailableError, 'model_unavailable');
+  } finally {
+    await primary.close();
+    await same.close();
+    await other.close();
   }
 });

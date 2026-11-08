@@ -32,25 +32,30 @@ function ModelRow({ holding }: { holding: Holding }) {
   );
 }
 
+const PRIMARY = 'main';
+
 /**
- * The media service's part of the Work tab's flow board (`ems.flow`, a `system.flow` panel in
- * ems's `nav.json`): its lanes with their slots and what each runs and keeps waiting, then the
- * models it holds, the working ones first. `ems-status`, polled while the Work tab is shown.
+ * One instance's columns: its lanes with their slots and what each runs and keeps waiting, then the
+ * models it holds, the working ones first. `ems-status`, polled while the Work tab is shown. Another
+ * instance's columns carry its name.
  */
-export default function FlowPanel() {
-  const { data: status } = usePolledCommand<EmsStatus>('ems-status');
+function InstanceFlow({ name }: { name: string }) {
+  const { data: status } = usePolledCommand<EmsStatus>(name === PRIMARY ? 'ems-status' : `ems-status --instance ${name}`);
+  const at = name === PRIMARY ? 'At the media service' : `At ${name}`;
+  const onModel = name === PRIMARY ? 'On a model' : `On a model at ${name}`;
   if (!status) {
     return (
-      <FlowColumn title='At the media service' color={WORKLOAD_COLORS.running}>
+      <FlowColumn title={at} color={WORKLOAD_COLORS.running}>
         <Skeleton height={80} />
       </FlowColumn>
     );
   }
   if (!status.running) {
     return (
-      <FlowColumn title='At the media service' color={WORKLOAD_COLORS.failed}>
+      <FlowColumn title={at} color={WORKLOAD_COLORS.failed}>
         <Text size='sm' c='dimmed'>
-          Not answering at <Text span ff='monospace' size='sm'>{status.url}</Text>; the steps that need it wait.
+          Not answering at <Text span ff='monospace' size='sm'>{status.url}</Text>;{' '}
+          {name === PRIMARY ? 'the steps that need it wait.' : 'its work goes to the other instances.'}
         </Text>
       </FlowColumn>
     );
@@ -66,7 +71,7 @@ export default function FlowPanel() {
   return (
     <>
       <FlowColumn
-        title='At the media service'
+        title={at}
         count={status.requests.length}
         color={WORKLOAD_COLORS.running}
         hint='Its lanes. A request waits here only when its lane is full.'
@@ -99,7 +104,7 @@ export default function FlowPanel() {
 
       <FlowArrow />
 
-      <FlowColumn title='On a model' count={families.size} color={CARD_COLOR} hint='What is loaded, and where; the working ones first.'>
+      <FlowColumn title={onModel} count={families.size} color={CARD_COLOR} hint='What is loaded, and where; the working ones first.'>
         <Stack gap={4}>
           {indexing.map((holding) => <ModelRow key={holding.key} holding={holding} />)}
           {indexing.length === 0 && <Text size='xs' c='dimmed'>No indexing model loaded</Text>}
@@ -107,6 +112,20 @@ export default function FlowPanel() {
           {search.map((holding) => <ModelRow key={holding.key} holding={holding} />)}
         </Stack>
       </FlowColumn>
+    </>
+  );
+}
+
+/**
+ * The media service's part of the Work tab's flow board (`ems.flow`, a `system.flow` panel in
+ * ems's `nav.json`): the primary's columns, then each other instance's (`ems-instance list`).
+ */
+export default function FlowPanel() {
+  const { data: others } = usePolledCommand<string[]>('ems-instance list --others --names');
+  return (
+    <>
+      <InstanceFlow name={PRIMARY} />
+      {(others ?? []).map((name) => <InstanceFlow key={name} name={name} />)}
     </>
   );
 }

@@ -1,8 +1,7 @@
 #!ts
 /**
  * ems-gpu — the card of an instance of the media service now, the primary's or the one `--instance`
- * names, with its last six hours, for the system dashboard's GPU panel (ems's `system.overview`
- * panel).
+ * names, with its last six hours.
  *
  * Read back from the readings of the instance's machine device (`/dev/ems`, `/dev/ems-<name>`)
  * that the `ems-sampler` service keeps, so a dashboard open in three browsers costs no request to

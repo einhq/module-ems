@@ -142,7 +142,9 @@ for another ([lib/machine.ts](../lib/machine.ts)): the `ems-sampler` service
 instance's health says of its machine as the device's readings: the card's load, decoder, encoder,
 memory, temperature and power, the machine's memory, and its CPU, the share busy between two
 answers' ticks. The device is online while the instance answers, and in the administrators' group.
-`ems-gpu` and `ems-memory` read the readings back for the dashboard's GPU, VRAM and RAM tiles.
+The System dashboard's Overview draws it as one of its machines, beside EiN's own, from the device
+alone; `ems-gpu` (and `top`'s GPU and VRAM gauges, `ems-gpu --gauge`) and `ems-memory`, with EMS's
+own part of the memory, read the readings back.
 
 EMS is not an EiN service, but the dashboard reads service rows, so the module carries one:
 `ems-link` ([modules/ems/services/ems-link](../services/ems-link)) polls `ems-status

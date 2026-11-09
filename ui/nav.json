@@ -1,13 +1,6 @@
 {
   "panels": [
     {
-      "id": "ems.gpu",
-      "slot": "system.overview",
-      "label": "GPU",
-      "icon": "device-desktop-analytics",
-      "route": "/system/gpu"
-    },
-    {
       "id": "ems.flow",
       "slot": "system.flow",
       "label": "Media service",

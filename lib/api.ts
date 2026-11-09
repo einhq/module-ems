@@ -184,9 +184,8 @@ export type EmsGpu = (GpuSample & { vramPercent?: number; utilSeries: GpuPoint[]
 type EmsMemoryReading = { totalMb: number; availableMb?: number; usedMb?: number; limitMb?: number };
 
 /**
- * `ems-memory`: the media service's machine's memory now and over the last six hours, for the
- * Overview's EMS RAM tile: in use (total less available) against the total, and EMS's own part.
- * Null when there is no reading.
+ * `ems-memory`: the media service's machine's memory now and over the last six hours: in use
+ * against the total, and EMS's own part. Null when there is no reading.
  */
 export type EmsMemory = {
   usedMb: number;

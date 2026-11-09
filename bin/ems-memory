@@ -1,8 +1,8 @@
 #!ts
 /**
  * ems-memory — the memory of the machine the media service runs on, now and over the last six
- * hours, for the Overview's EMS RAM tile: in use against the total, and what EMS's own container
- * holds of it. That machine need not be EiN's.
+ * hours: in use against the total, and what EMS's own container holds of it, which the machine's
+ * device does not know. That machine need not be EiN's.
  *
  * The machine's are its device's readings (`/dev/ems`: `memory-used`, `memory-total`), EMS's own
  * the newest `ems-models` sample's; the `ems-sampler` service keeps both, so the tile costs no

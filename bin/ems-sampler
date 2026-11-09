@@ -1,0 +1,97 @@
+#!ts
+/**
+ * ems-sampler — the ems-sampler service: registers the `ems` driver and, every 15 s, asks each
+ * instance of the media service for its health once. What it says of its machine (the card, the
+ * memory, the CPU) goes to the machine's device (`EmsMachines`, `/dev/ems`, `/dev/ems-<name>`),
+ * which is online while the instance answers. Each minute, what the instance holds (its card mode,
+ * its model copies, the models working, EiN's work beside them) is appended to its `ems-models`
+ * series, `ems-models-<name>` for another instance, which `ems-models` and `ems-memory` read back.
+ *
+ * Long-running, so exempt from JSON output: it owns its stdout as a service log.
+ */
+
+import { ADMIN_ACCESS, type CmdReturn, type Command, readTail, seriesPath, TRIGGER_POOL } from '@ein/client';
+import { health } from '@ems/client';
+import { instanceSeries, listInstances } from '@ems/instances';
+import { EMS_DRIVER, emsDriver, EmsMachines } from '@ems/machine';
+import { modelsSample, type PoolsReading, workWaiting } from '@ems/models';
+import { statusFromHealth } from '@ems/status';
+
+const TICK_MS = 15_000;
+/** Ticks between two samples of what each instance holds: a minute. */
+const MODELS_EVERY = 4;
+
+/** Append `value` to the series `name`, making its log the first time, kept a week. */
+const appendSeries = async (cmd: Command, name: string, value: unknown): Promise<void> => {
+  const path = seriesPath(name);
+  const vfs = cmd.sys.vfs;
+  if (!(await vfs.exists(ADMIN_ACCESS, path))) {
+    const at = path.lastIndexOf('/');
+    await vfs.ensure(ADMIN_ACCESS, 'log', path.slice(0, at), path.slice(at + 1), { attrs: { retention: '7 day' } });
+  }
+  const handle = await vfs.open(ADMIN_ACCESS, path, { mode: 'a' });
+  try {
+    await handle.write(new TextEncoder().encode(`${JSON.stringify(value)}\n`));
+  } finally {
+    await handle.close();
+  }
+};
+
+const emsSampler = async (cmd: Command): CmdReturn => {
+  const devices = cmd.sys.devices;
+  if (!devices) {
+    await cmd.writeError('ems-sampler: this EiN keeps no devices\n');
+    return 1;
+  }
+  let stop = () => {};
+  const stopped = new Promise<void>((resolve) => stop = resolve);
+  cmd.onInterrupt(() => stop());
+  const unregister = devices.registerDriver(EMS_DRIVER, emsDriver);
+  const machines = new EmsMachines({ vfs: cmd.sys.vfs, devices });
+  await cmd.writeLn(`ems-sampler: driving ${EMS_DRIVER}, every ${TICK_MS / 1000}s`);
+
+  try {
+    for (let tick = 0;; tick++) {
+      for (const instance of await listInstances(cmd).catch(() => [])) {
+        const answer = await health(cmd, instance).catch(() => null);
+        try {
+          await machines.write(instance.name, answer);
+        } catch (error) {
+          await cmd.writeLn(`ems-sampler: ${instance.name}'s machine: ${error instanceof Error ? error.message : error}`);
+        }
+        if (!answer || tick % MODELS_EVERY !== 0) continue;
+        try {
+          // EiN's work beside it, from core's newest pools reading; none before the sampler has one.
+          const [pools] = await readTail<PoolsReading>(cmd.sys.vfs, ADMIN_ACCESS, seriesPath('pools'), 1).catch(() => []);
+          const sample = modelsSample(statusFromHealth(answer, instance.url, instance.name), pools ? workWaiting(pools.value, TRIGGER_POOL) : undefined);
+          await appendSeries(cmd, instanceSeries('ems-models', instance.name), sample);
+        } catch (error) {
+          await cmd.writeLn(`ems-sampler: ${instance.name}'s models: ${error instanceof Error ? error.message : error}`);
+        }
+      }
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const ticked = await Promise.race([stopped.then(() => false), new Promise<boolean>((resolve) => timer = setTimeout(() => resolve(true), TICK_MS))]);
+      clearTimeout(timer);
+      if (!ticked) break;
+    }
+  } finally {
+    unregister();
+    cmd.onInterrupt(null);
+  }
+  await cmd.writeLn('ems-sampler: stopped');
+  return 0;
+};
+
+emsSampler.spec = {
+  name: 'ems-sampler',
+  admin: true,
+  daemon: true,
+  effect: 'write' as const,
+  json: false,
+  description: 'Drive the machine each instance of the media service runs on as a device, and sample what it holds (the ems-sampler service)',
+  args: [],
+  flags: [],
+  examples: ['service restart ems-sampler'],
+};
+
+export default emsSampler;

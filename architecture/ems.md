@@ -132,9 +132,17 @@ are ([ui/components/MemoryMap.tsx](../ui/components/MemoryMap.tsx)): the card sp
 EMS's runtime, the chat model and others, and free; RAM into each model and the workers. A search
 model's RAM copy beside its card copy while the card is quiet is drawn as standby: it is what answers
 the moment indexing takes the card, and is kept on purpose (ein/core#1070). The models sit on a shelf
-by what they are doing, and a strip shows the last hours: the `gpu-sampler` service appends
-`ems-models-sample` each minute to the `ems-models` series, what EMS holds beside EiN's work waiting
-(core's newest `pools` reading), and `ems-models` reads it back.
+by what they are doing, and a strip shows the last hours: the `ems-sampler` service appends a
+sample each minute to the `ems-models` series, what EMS holds beside EiN's work waiting (core's
+newest `pools` reading), and `ems-models` reads it back.
+
+The machine each instance runs on is a device, `/dev/ems` for the primary and `/dev/ems-<name>`
+for another ([lib/machine.ts](../lib/machine.ts)): the `ems-sampler` service
+([bin/ems-sampler](../bin/ems-sampler)) registers the `ems` driver and, every 15 s, writes what the
+instance's health says of its machine as the device's readings: the card's load, decoder, encoder,
+memory, temperature and power, the machine's memory, and its CPU, the share busy between two
+answers' ticks. The device is online while the instance answers, and in the administrators' group.
+`ems-gpu` and `ems-memory` read the readings back for the dashboard's GPU, VRAM and RAM tiles.
 
 EMS is not an EiN service, but the dashboard reads service rows, so the module carries one:
 `ems-link` ([modules/ems/services/ems-link](../services/ems-link)) polls `ems-status

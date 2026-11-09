@@ -1,6 +1,6 @@
 /**
- * What the media service holds, as one sample of the `ems-models` series (`ems-models-sample`,
- * which the `gpu-sampler` service appends each minute): the card mode, every model copy and where it
+ * What the media service holds, as one sample of the `ems-models` series (which the `ems-sampler`
+ * service appends each minute): the card mode, every model copy and where it
  * is, and the families a request is using. Read back by `ems-models` for the Media service tab's
  * strip.
  */

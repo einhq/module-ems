@@ -78,7 +78,7 @@ export function ModelTimeline({ history }: { history?: EmsModels | null }) {
         <Title order={5}>The last {hours} hours</Title>
         <Text size='xs' c='dimmed' ml='auto'>solid: on the card · outlined: in RAM · underlined: working</Text>
       </Group>
-      {samples.length === 0 ? <Text size='sm' c='dimmed'>Nothing sampled yet: the gpu-sampler service writes a sample a minute.</Text> : (
+      {samples.length === 0 ? <Text size='sm' c='dimmed'>Nothing sampled yet: the ems-sampler service writes a sample a minute.</Text> : (
         <Box style={{ overflowX: 'auto' }}>
           <Box miw={560} style={{ display: 'grid', gridTemplateColumns: 'max-content 1fr', gap: '4px 10px', alignItems: 'center' }}>
             <Text size='xs' c='dimmed' ta='right'>work waiting</Text>

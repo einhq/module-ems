@@ -1,5 +1,0 @@
-{
-  "description": "Samples each media service instance's GPU and what models it holds, for the system dashboard",
-  "restartPolicy": "on-failure",
-  "gaugeCommand": "ems-gpu --gauge"
-}

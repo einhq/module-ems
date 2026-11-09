@@ -4,53 +4,43 @@
  * names, with its last six hours, for the system dashboard's GPU panel (ems's `system.overview`
  * panel).
  *
- * Read back from the instance's `gpu` metrics series the `gpu-sampler` service keeps, so a dashboard
- * open in three browsers costs no request to EMS. Null when there is no reading: no media service,
- * or one that sees no card — no GPU and an idle GPU are not the same fact.
+ * Read back from the readings of the instance's machine device (`/dev/ems`, `/dev/ems-<name>`)
+ * that the `ems-sampler` service keeps, so a dashboard open in three browsers costs no request to
+ * EMS. Null when there is no reading in those six hours: no media service, or one that sees no
+ * card — no GPU and an idle GPU are not the same fact.
  *
- * `--gauge` answers the gauges `top` draws beside the host's RAM (the `gpu-sampler` service's
+ * `--gauge` answers the gauges `top` draws beside the host's RAM (the `ems-sampler` service's
  * `gaugeCommand`): each card's utilization and its memory, another instance's named after it, and
  * none for an instance without a reading.
  */
-import { type CmdReturn, collectUnknownFlags, type Command, type Gauge, parseArgs, readTail, reportUnknownFlags, seriesPath } from '@ein/client';
-import type { EmsGpu, GpuPoint, GpuSample } from '@ems/api';
-import { instanceSeries, otherInstanceNames, PRIMARY } from '@ems/instances';
+import { type CmdReturn, collectUnknownFlags, type Command, type Gauge, parseArgs, reportUnknownFlags } from '@ein/client';
+import type { EmsGpu } from '@ems/api';
+import { otherInstanceNames, PRIMARY } from '@ems/instances';
+import { readMachine } from '@ems/machine';
 
-/** Six hours at the sampler's 15 s. */
 const WINDOW_MS = 6 * 60 * 60 * 1000;
-const READ_LIMIT = 1600;
-/** Points per sparkline: more than a tile is wide is only bytes. */
-const POINTS = 120;
 
-const percent = (used: number, total: number): number | undefined => total > 0 ? (used / total) * 100 : undefined;
-
-/** Every n-th sample, keeping the newest, so the line spans the whole window in `POINTS`. */
-const thin = <T>(samples: T[]): T[] => {
-  if (samples.length <= POINTS) return samples;
-  const step = samples.length / POINTS;
-  return Array.from({ length: POINTS }, (_, i) => samples[Math.min(samples.length - 1, Math.round((i + 1) * step) - 1)]);
-};
-
-const points = (samples: { at: number; value: GpuSample }[], value: (entry: GpuSample) => number | undefined): GpuPoint[] =>
-  thin(samples).flatMap((sample) => {
-    const v = value(sample.value);
-    return v === undefined ? [] : [{ at: sample.at, value: v }];
-  });
-
-/** An instance's card now and its last six hours, from its series; null without a reading. */
+/** An instance's card now and its last six hours, from its machine's readings; null without a reading. */
 const cardOf = async (cmd: Command, name: string): Promise<EmsGpu> => {
-  const all = await readTail<GpuSample>(cmd.sys.vfs, cmd.access, seriesPath(instanceSeries('gpu', name)), READ_LIMIT).catch(() => []);
-  const since = Date.now() - WINDOW_MS;
-  const recent = all.filter((sample) => sample.at >= since);
-  const now = recent[recent.length - 1]?.value;
-  return now
-    ? {
-      ...now,
-      vramPercent: percent(now.memUsedMb, now.memTotalMb),
-      utilSeries: points(recent, (entry) => entry.utilPct),
-      vramSeries: points(recent, (entry) => percent(entry.memUsedMb, entry.memTotalMb)),
-    }
-    : null;
+  const read = (endpoint: string) => readMachine(cmd, name, endpoint, WINDOW_MS);
+  const [util, vram, total, temp, decoder, encoder, power, powerLimit] = await Promise.all(
+    ['gpu', 'vram-used', 'vram-total', 'gpu-temperature', 'decoder', 'encoder', 'gpu-power', 'gpu-power-limit'].map(read),
+  );
+  if (util.now === undefined || vram.now === undefined || total.now === undefined || temp.now === undefined) return null;
+  const memTotalMb = Math.round(total.now * 1024);
+  return {
+    utilPct: util.now,
+    ...(decoder.now !== undefined ? { decPct: decoder.now } : {}),
+    ...(encoder.now !== undefined ? { encPct: encoder.now } : {}),
+    memUsedMb: Math.round(memTotalMb * vram.now / 100),
+    memTotalMb,
+    tempC: temp.now,
+    ...(power.now !== undefined ? { powerW: power.now } : {}),
+    ...(powerLimit.now !== undefined ? { powerLimitW: powerLimit.now } : {}),
+    vramPercent: vram.now,
+    utilSeries: util.series,
+    vramSeries: vram.series,
+  };
 };
 
 const emsGpu = async (cmd: Command): CmdReturn => {
@@ -89,13 +79,13 @@ const emsGpu = async (cmd: Command): CmdReturn => {
 emsGpu.spec = {
   name: 'ems-gpu',
   effect: 'read' as const,
-  description: 'The GPU of an instance of the media service now, with the last six hours of utilization and VRAM',
+  description: 'The GPU of an instance of the media service now, with the last six hours of utilization and VRAM, from its machine device',
   args: [],
   flags: [
     {
       name: 'gauge',
       type: 'bool' as const,
-      description: "The GPU and VRAM gauges top draws beside the host, each instance's with a card (the gpu-sampler service declares it)",
+      description: "The GPU and VRAM gauges top draws beside the host, each instance's with a card (the ems-sampler service declares it)",
     },
     { name: 'instance', type: 'string' as const, description: 'The instance whose card (ems-instance list); main, the primary, by default' },
   ],

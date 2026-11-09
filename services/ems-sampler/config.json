@@ -1,0 +1,5 @@
+{
+  "description": "Drives the machine each instance of the media service runs on as a device, and samples what models it holds",
+  "restartPolicy": "on-failure",
+  "gaugeCommand": "ems-gpu --gauge"
+}

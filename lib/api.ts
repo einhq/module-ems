@@ -152,11 +152,11 @@ export type EmsStatus =
   };
 
 /**
- * One reading of the card EMS runs on, as `ems-gpu-sample` answers and the `gpu` series stores it.
- * The loads are means over the seconds before it where EMS can average them; `decPct` and `encPct`
- * are the video decoder and encoder, which `utilPct` does not count.
+ * The card EMS runs on now, from its machine device's readings (`/dev/ems`). The loads are means
+ * over the seconds before a reading where EMS can average them; `decPct` and `encPct` are the video
+ * decoder and encoder, which `utilPct` does not count.
  */
-export type GpuSample = {
+type GpuSample = {
   utilPct: number;
   decPct?: number;
   encPct?: number;
@@ -169,11 +169,11 @@ export type GpuSample = {
 };
 
 /** A point of a recent history: epoch ms and a percentage. */
-export type GpuPoint = { at: number; value: number };
+type GpuPoint = { at: number; value: number };
 
 /**
- * `ems-gpu`: the card now and its recent history, read back from the `gpu` series the
- * `gpu-sampler` service keeps. Null when there is no reading: no media service, or no card.
+ * `ems-gpu`: the card now and its recent history, read back from its machine device's readings,
+ * which the `ems-sampler` service keeps. Null when there is no reading: no media service, or no card.
  */
 export type EmsGpu = (GpuSample & { vramPercent?: number; utilSeries: GpuPoint[]; vramSeries: GpuPoint[] }) | null;
 
@@ -198,8 +198,8 @@ export type EmsMemory = {
 } | null;
 
 /**
- * What the media service held at one moment, as `ems-models-sample` answers and the `ems-models`
- * series stores it, a minute apart: the card mode, each model copy and where it was, the families a
+ * What the media service held at one moment, as the `ems-sampler` service appends it to the
+ * `ems-models` series, a minute apart: the card mode, each model copy and where it was, the families a
  * request was using, and EiN's own work beside it from core's newest `pools` reading — not made
  * yet (`notStarted`) and in line for a worker (`inLine`).
  */

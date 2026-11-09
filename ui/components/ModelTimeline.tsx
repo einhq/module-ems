@@ -3,6 +3,7 @@ import { TablerIcon, WAITING_COLOR, WORKLOAD_COLORS } from '@ein/ui/components';
 import type { ReactNode } from 'react';
 import type { EmsCardMode, EmsModels, EmsModelsSample } from '@ems/api';
 import { CARD_COLOR, RAM_COLOR } from './holdings.ts';
+import { formatTime } from '@ein/ui/lib';
 
 /** A sample covers the minute after it; a longer gap is time nobody sampled, drawn empty. */
 const SAMPLE_MS = 60_000;
@@ -107,7 +108,7 @@ export function ModelTimeline({ history }: { history?: EmsModels | null }) {
             <Track label='card mode'>
               {(['busy', 'quiet', 'switching'] as const).flatMap((mode) =>
                 spansWhere(samples, spans, (value) => value.mode === mode).map((span) => (
-                  <Tooltip key={`${mode}-${span.from}`} label={`${mode}, ${new Date(span.from).toLocaleTimeString()}–${new Date(span.to).toLocaleTimeString()}`} withArrow>
+                  <Tooltip key={`${mode}-${span.from}`} label={`${mode}, ${formatTime(span.from)}–${formatTime(span.to)}`} withArrow>
                     <Box pos='absolute' top={2} bottom={2} left={x(span.from)} w={w(span)} style={{ borderRadius: 2, background: MODE_COLORS[mode] }} />
                   </Tooltip>
                 ))
@@ -148,7 +149,7 @@ export function ModelTimeline({ history }: { history?: EmsModels | null }) {
             <Group justify='space-between' wrap='nowrap'>
               {ticks.map((tick, index) => (
                 <Text key={tick} size='xs' c='dimmed'>
-                  {index === ticks.length - 1 ? 'now' : new Date(tick).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  {index === ticks.length - 1 ? 'now' : formatTime(tick, { hour: '2-digit', minute: '2-digit' })}
                 </Text>
               ))}
             </Group>

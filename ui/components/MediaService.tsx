@@ -1,7 +1,7 @@
 import { Alert, Badge, Box, Button, Card, Collapse, Group, HoverCard, Loader, Progress, SimpleGrid, Skeleton, Stack, Table, Text, Title, Tooltip } from '@mantine/core';
 import type { EmsCaller, EmsCardMode, EmsFamily, EmsLane, EmsModelCopy, EmsModels, EmsModelSize, EmsPlacement, EmsRequest, EmsStatus } from '@ems/api';
 import { TablerIcon, utilizationColor } from '@ein/ui/components';
-import { formatUptime } from '@ein/ui/lib';
+import { formatDateTime, formatTime, formatUptime } from '@ein/ui/lib';
 import { useState } from 'react';
 import { MemoryMap } from './MemoryMap.tsx';
 import { ModelShelf } from './ModelShelf.tsx';
@@ -25,7 +25,7 @@ const ago = (epochSeconds?: number): string | undefined => {
   return seconds < 60 ? `${Math.round(seconds)}s` : formatUptime(seconds * 1000);
 };
 
-const clock = (epochSeconds: number): string => new Date(epochSeconds * 1000).toLocaleString();
+const clock = (epochSeconds: number): string => formatDateTime(epochSeconds * 1000);
 
 const megabytes = (mb?: number): string => mb === undefined ? '—' : mb >= 1024 ? `${(mb / 1024).toFixed(1)} GB` : `${Math.round(mb)} MB`;
 
@@ -151,7 +151,7 @@ function Summary({ status }: { status: Running }) {
       </Group>
       <Group gap='xl' wrap='wrap'>
         {build?.version && <Fact label='version' value={build.version} />}
-        {build?.commit && <Fact label='commit' value={build.commit} tooltip={build.date ? `Committed ${new Date(build.date).toLocaleString()}` : undefined} />}
+        {build?.commit && <Fact label='commit' value={build.commit} tooltip={build.date ? `Committed ${formatDateTime(build.date)}` : undefined} />}
         <Fact label='api' value={status.api} />
         <Fact label='uptime' value={formatUptime(status.uptime * 1000)} />
         <Fact
@@ -624,9 +624,7 @@ function Requests(
                     </Table.Td>
                     <Table.Td ta='right'>
                       <Tooltip
-                        label={`Queued ${new Date(request.queued * 1000).toLocaleTimeString()}${
-                          request.started !== undefined ? `, admitted ${new Date(request.started * 1000).toLocaleTimeString()}` : ''
-                        }`}
+                        label={`Queued ${formatTime(request.queued * 1000)}${request.started !== undefined ? `, admitted ${formatTime(request.started * 1000)}` : ''}`}
                         withArrow
                       >
                         <Text size='xs' ff='monospace'>{ago(request.started ?? request.queued)}</Text>

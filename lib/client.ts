@@ -1280,7 +1280,7 @@ export type WatchSpec = {
 };
 
 /** A watch as EMS reports it; `source` without its password. */
-export type WatchStatus = {
+type WatchStatus = {
   id: string;
   source: string;
   state: 'connecting' | 'running' | 'lost';
@@ -1296,7 +1296,7 @@ export type WatchStatus = {
 };
 
 /** A face a watch saw, in its `face` and `face.end` events. */
-export type WatchFace = {
+type WatchFace = {
   track: number;
   box: Box;
   confidence: number;

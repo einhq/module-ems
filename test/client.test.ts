@@ -13,6 +13,7 @@ import { type Command, STEP_EXIT_TEMPORARY } from '@ein/client';
 import type { DetectVideoFacesResult } from '../lib/client.ts';
 import {
   activeSpeakers,
+  deleteWatch,
   detectFaces,
   detectVideoFaces,
   embedImage,
@@ -26,10 +27,14 @@ import {
   generations,
   health,
   isFileFault,
+  listWatches,
+  putWatch,
   stepExitCode,
   transcodeVideo,
   transcribe,
   voiceprint,
+  type WatchEvent,
+  watchEvents,
 } from '../lib/client.ts';
 import { startStubEms } from './stub-ems.ts';
 
@@ -463,5 +468,37 @@ Deno.test('a search the primary cannot answer goes to an instance that stamps it
     await primary.close();
     await same.close();
     await other.close();
+  }
+});
+
+Deno.test('a watch is put, listed and followed until it is deleted, and one EMS lacks is refused', async () => {
+  const stub = startStubEms();
+  try {
+    const { cmd } = makeCmd({ CFG_EMS_URL: stub.url });
+    const spec = { source: 'rtsp://ein:x@192.0.2.1:8554/front-door-sub', faces: { fps: 3 } };
+    assertEquals((await putWatch(cmd, 'ein-front-door-sub', spec)).made, true);
+    assertEquals((await putWatch(cmd, 'ein-front-door-sub', spec)).made, false);
+    assertEquals((await listWatches(cmd)).map((watch) => watch.id), ['ein-front-door-sub']);
+
+    const heard: WatchEvent[] = [];
+    const following = (async () => {
+      for await (const event of watchEvents(cmd, 'ein-front-door-sub', new AbortController().signal)) heard.push(event);
+    })();
+    while (stub.tell('ein-front-door-sub', { type: 'motion' }) === 0) await new Promise((resolve) => setTimeout(resolve, 10));
+    stub.tell('ein-front-door-sub', { type: 'face', track: 1, box: { x: 0.1, y: 0.1, width: 0.2, height: 0.2 }, confidence: 0.9, embedding: [1, 0] });
+    await deleteWatch(cmd, 'ein-front-door-sub');
+    await following;
+    assertEquals(heard.map((event) => event.type), ['motion', 'face']);
+    assertEquals(stub.watches.size, 0);
+    await assertRejects(
+      () =>
+        (async () => {
+          for await (const _ of watchEvents(cmd, 'gone', new AbortController().signal)) { /* nothing */ }
+        })(),
+      EmsError,
+      'no watch',
+    );
+  } finally {
+    await stub.close();
   }
 });

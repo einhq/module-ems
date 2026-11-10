@@ -1,7 +1,8 @@
 /**
  * A stand-in EMS on loopback for the fast tier: answers each op from a table, records what it
  * was asked, and speaks the real envelope (`{ok, result, meta}` / `{ok:false, error}`), so a
- * caller's handling of both is what gets exercised — never a model.
+ * caller's handling of both is what gets exercised — never a model. Its watches are kept as they
+ * are put, and a test tells their events (`tell`).
  *
  * It serves itself the files of its requests as `ems-files` serves EMS, in the same process: the
  * client sends names, and what the stub records and hands its handlers is the file each stands
@@ -23,6 +24,10 @@ export type StubEms = {
   requests: { op: string; body: Record<string, unknown>; authorization: string | null }[];
   /** Ops whose caller closed the connection before they were answered, in order. */
   hungUp: string[];
+  /** The watches put, by id, each with the spec it was given. */
+  watches: Map<string, Record<string, unknown>>;
+  /** Send an event to whoever follows the watch `id`'s events; answers how many do. */
+  tell: (id: string, event: Record<string, unknown>) => number;
   close: () => Promise<void>;
 };
 
@@ -65,12 +70,67 @@ const unnamed = (value: unknown): unknown => {
   return out;
 };
 
+/** A watch's status as the stub answers it. */
+const watchStatus = (id: string, spec: Record<string, unknown>) => ({
+  id,
+  source: String(spec.source ?? ''),
+  state: 'running',
+  since: new Date(0).toISOString(),
+  frames: 0,
+  looked: 0,
+  faces: 0,
+  following: 0,
+  motion: false,
+});
+
 export const startStubEms = (options: StubOptions = {}): StubEms => {
   const requests: StubEms['requests'] = [];
   const hungUp: string[] = [];
+  const watches = new Map<string, Record<string, unknown>>();
+  const followers = new Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>();
+  const encoder = new TextEncoder();
+  const sse = (event: string, data: unknown) => encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+  const ok = (result: unknown) => Response.json({ ok: true, result, meta: { api: '0.3.5' } });
+  const watchRoute = async (req: Request, path: string): Promise<Response> => {
+    const [, id, events] = path.split('/').map(decodeURIComponent);
+    if (!id && req.method === 'GET') return ok([...watches].map(([each, spec]) => watchStatus(each, spec)));
+    if (id && events === 'events' && req.method === 'GET') {
+      if (!watches.has(id)) return Response.json({ ok: false, error: { code: 'not_found', message: `no watch ${id}` } }, { status: 404 });
+      let follower: ReadableStreamDefaultController<Uint8Array>;
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          follower = controller;
+          if (!followers.has(id)) followers.set(id, new Set());
+          followers.get(id)!.add(controller);
+          controller.enqueue(sse('state', watchStatus(id, watches.get(id)!)));
+        },
+        cancel() {
+          followers.get(id)?.delete(follower);
+        },
+      });
+      return new Response(stream, { headers: { 'content-type': 'text/event-stream' } });
+    }
+    if (id && req.method === 'PUT') {
+      const spec = await req.json() as Record<string, unknown>;
+      const made = JSON.stringify(watches.get(id)) !== JSON.stringify(spec);
+      watches.set(id, spec);
+      return ok({ ...watchStatus(id, spec), made });
+    }
+    if (id && req.method === 'DELETE') {
+      watches.delete(id);
+      for (const follower of followers.get(id) ?? []) {
+        follower.enqueue(sse('end', { watch: id }));
+        follower.close();
+      }
+      followers.delete(id);
+      return ok(null);
+    }
+    return Response.json({ ok: false, error: { code: 'invalid_request', message: `no route ${req.method} ${path}` } }, { status: 400 });
+  };
   const server = Deno.serve({ port: 0, hostname: '127.0.0.1', onListen: () => {} }, async (req) => {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^\/v0\//, '');
+    if (path === 'watches' || path.startsWith('watches/')) return await watchRoute(req, path);
     // The signal also fires once an answer is sent, so only an abort during the delay is a hang-up.
     const delay = async (op: string) => {
       if (!options.delayMs) return;
@@ -137,7 +197,14 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
     url,
     requests,
     hungUp,
+    watches,
+    tell: (id, event) => {
+      const each = followers.get(id) ?? new Set();
+      for (const follower of each) follower.enqueue(sse(String(event.type), { watch: id, at: new Date().toISOString(), t: 0, ...event }));
+      return each.size;
+    },
     close: () => {
+      for (const each of followers.values()) for (const follower of each) follower.close();
       filesState().endpoints.delete(url);
       return server.shutdown();
     },

@@ -9,6 +9,9 @@
  * through that endpoint. With `CFG_EMS_FILES_ADDRESS` empty, or the service not serving yet, no
  * request that names a file goes: EMS counts as unavailable.
  *
+ * Watches (`putWatch`, `watchEvents`, …) are EMS's live streams read for their faces: they name no
+ * file, only the stream, and their events come as they happen.
+ *
  * Three outcomes matter to everything downstream, and they are kept distinct: EMS unreachable
  * (`EmsUnavailableError` — the step fails for its normal retry path), EMS answered with a
  * failure (`EmsError`, carrying the API's `code` and `permanent`), and a `null` result, which
@@ -1264,3 +1267,145 @@ export const health = async (cmd: Command, instance?: EmsInstance): Promise<Heal
   const result = await getOn(cmd, target, 'health');
   return result && typeof result === 'object' && (result as HealthResult).ok ? result as HealthResult : null;
 };
+
+/** What a watch reads and how (EMS 4.24): the stream, its faces and motion, and whether a face's crop comes. */
+export type WatchSpec = {
+  source: string;
+  faces?: { fps?: number; min_size?: number; min_confidence?: number };
+  motion?: boolean;
+  mask?: Box[];
+  angle?: 0 | 90 | 180 | 270;
+  mirror?: boolean;
+  crops?: boolean;
+};
+
+/** A watch as EMS reports it; `source` without its password. */
+export type WatchStatus = {
+  id: string;
+  source: string;
+  state: 'connecting' | 'running' | 'lost';
+  since: string;
+  frames: number;
+  looked: number;
+  faces: number;
+  following: number;
+  motion: boolean;
+  error?: string;
+  /** On a put: whether it was made now, rather than left running as it was. */
+  made?: boolean;
+};
+
+/** A face a watch saw, in its `face` and `face.end` events. */
+export type WatchFace = {
+  track: number;
+  box: Box;
+  confidence: number;
+  frame: { width: number; height: number };
+  embedding: number[];
+  landmarks?: [number, number][];
+  pose?: { pitch: number; yaw: number; roll: number };
+  /** A JPEG of the face, base64. */
+  crop?: { type: string; data: string };
+  /** `face.end`'s: when it was seen, in `t`'s seconds, and how often. */
+  appearances?: [number, number][];
+  detections?: number;
+};
+
+/** One event of a watch (EMS 4.24): every one has `type`, `watch`, `at` and `t`. */
+export type WatchEvent =
+  & { watch: string; at: string; t: number }
+  & (
+    | ({ type: 'face' | 'face.end' } & WatchFace)
+    | { type: 'motion' | 'motion.end' | 'source.back' }
+    | { type: 'source.lost'; reason: string }
+  );
+
+/** A watch's route on the instance the command calls, answered as an op's envelope is. */
+const watchRequest = async (cmd: Command, method: string, path: string, body?: unknown): Promise<unknown> => {
+  const instance = await emsInstance(cmd);
+  const ems = who(instance);
+  let response: Response;
+  try {
+    response = await fetchOnce(cmd, `watches ${method}`, `${instance.url}/${API_MAJOR}/${path}`, {
+      method,
+      headers: headers(instance),
+      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    }, WATCH_REQUEST_MS);
+  } catch (error) {
+    if (error instanceof ConnectError) throw new EmsUnavailableError(`${ems}: watches unreachable: ${error.message}`);
+    throw error;
+  }
+  const envelope = await response.json().catch(() => undefined) as Envelope | undefined;
+  if (!envelope) throw new EmsUnavailableError(`${ems}: watches answered ${response.status} with no usable body`);
+  if (!envelope.ok) {
+    const code = envelope.error?.code ?? `http_${response.status}`;
+    const message = envelope.error?.message ?? `HTTP ${response.status}`;
+    if (code === 'busy' || code === 'model_unavailable') throw new EmsUnavailableError(`${ems}: watches ${message} (${code})`);
+    throw new EmsError('watches', code, message, envelope.error?.permanent === true, response.status);
+  }
+  return envelope.result;
+};
+
+/** How long a watch's own request may take: it makes, lists or stops one, and waits on nothing. */
+const WATCH_REQUEST_MS = 15_000;
+
+/** Make the watch `id`, or leave it running when EMS has it with this spec already. */
+export const putWatch = async (cmd: Command, id: string, spec: WatchSpec): Promise<WatchStatus> =>
+  await watchRequest(cmd, 'PUT', `watches/${encodeURIComponent(id)}`, spec) as WatchStatus;
+
+/** Every watch the instance runs, whoever stated it. */
+export const listWatches = async (cmd: Command): Promise<WatchStatus[]> => await watchRequest(cmd, 'GET', 'watches') as WatchStatus[];
+
+/** Stop the watch `id`. */
+export const deleteWatch = async (cmd: Command, id: string): Promise<void> => {
+  await watchRequest(cmd, 'DELETE', `watches/${encodeURIComponent(id)}`);
+};
+
+/**
+ * What the watch `id` sees, as it comes, until `signal` aborts, the watch is deleted or EMS goes
+ * away, when it ends. The stream's opening `state` event is left out.
+ */
+export async function* watchEvents(cmd: Command, id: string, signal: AbortSignal): AsyncGenerator<WatchEvent> {
+  const instance = await emsInstance(cmd);
+  let response: Response;
+  try {
+    response = await fetch(`${instance.url}/${API_MAJOR}/watches/${encodeURIComponent(id)}/events`, {
+      headers: { ...headers(instance), accept: 'text/event-stream' },
+      signal,
+    });
+  } catch (error) {
+    if (signal.aborted) return;
+    throw new EmsUnavailableError(`${who(instance)}: watch ${id} unreachable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!response.ok || !response.body) {
+    const envelope = await response.json().catch(() => undefined) as Envelope | undefined;
+    throw new EmsError('watches', envelope?.error?.code ?? `http_${response.status}`, envelope?.error?.message ?? `HTTP ${response.status}`, false, response.status);
+  }
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = '';
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) return;
+      buffer += value;
+      const blocks = buffer.split(/\r?\n\r?\n/);
+      buffer = blocks.pop() ?? '';
+      for (const block of blocks) {
+        let event = '';
+        const data: string[] = [];
+        for (const line of block.split(/\r?\n/)) {
+          if (line.startsWith('event:')) event = line.slice(6).trim();
+          else if (line.startsWith('data:')) data.push(line.slice(5).trimStart());
+        }
+        if (!event || event === 'state' || data.length === 0) continue;
+        if (event === 'end') return;
+        yield JSON.parse(data.join('\n')) as WatchEvent;
+      }
+    }
+  } catch (error) {
+    if (signal.aborted) return;
+    throw error;
+  } finally {
+    await reader.cancel().catch(() => {});
+  }
+}

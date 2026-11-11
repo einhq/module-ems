@@ -1331,7 +1331,7 @@ export type WatchEvent =
   );
 
 /** A clip a watch cut, an MP4 EMS keeps until it is dropped: its id, when it starts and ends, its length in seconds, its bytes, and what opened it. */
-export type WatchClip = { clip: string; start: string; end: string; duration: number; size: number; reasons: ('face' | 'motion' | 'request')[] };
+type WatchClip = { clip: string; start: string; end: string; duration: number; size: number; reasons: ('face' | 'motion' | 'request')[] };
 
 /** A watch's route on the instance the command calls, answered as an op's envelope is. */
 const watchRequest = async (cmd: Command, method: string, path: string, body?: unknown): Promise<unknown> => {

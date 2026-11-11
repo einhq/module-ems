@@ -10,7 +10,8 @@
  * request that names a file goes: EMS counts as unavailable.
  *
  * Watches (`putWatch`, `watchEvents`, …) are EMS's live streams read for their faces: they name no
- * file, only the stream, and their events come as they happen.
+ * file, only the stream, and their events come as they happen. A watch's clips are videos EMS cut of
+ * its stream, fetched from EMS by id (`clipBody`) and then dropped there (`dropClip`).
  *
  * Three outcomes matter to everything downstream, and they are kept distinct: EMS unreachable
  * (`EmsUnavailableError` — the step fails for its normal retry path), EMS answered with a
@@ -1268,7 +1269,11 @@ export const health = async (cmd: Command, instance?: EmsInstance): Promise<Heal
   return result && typeof result === 'object' && (result as HealthResult).ok ? result as HealthResult : null;
 };
 
-/** What a watch reads and how (EMS 4.24): the stream, its faces and motion, and whether a face's crop comes. */
+/**
+ * What a watch reads and how (EMS 4.24): the stream, its faces and motion, whether a face's crop
+ * comes, and the clips it cuts of the stream: what opens one, the seconds before and after it, the
+ * longest, and the stream recorded when not the one watched.
+ */
 export type WatchSpec = {
   source: string;
   faces?: { fps?: number; min_size?: number; min_confidence?: number };
@@ -1277,6 +1282,7 @@ export type WatchSpec = {
   angle?: 0 | 90 | 180 | 270;
   mirror?: boolean;
   crops?: boolean;
+  clips?: { on?: ('face' | 'motion')[]; pre?: number; post?: number; max?: number; source?: string };
 };
 
 /** A watch as EMS reports it; `source` without its password. */
@@ -1290,6 +1296,8 @@ type WatchStatus = {
   faces: number;
   following: number;
   motion: boolean;
+  /** A watch with clips: its recording, and its clips. */
+  clips?: { state: 'connecting' | 'recording' | 'lost'; segments: number; made: number; ready: number; open?: string; error?: string };
   error?: string;
   /** On a put: whether it was made now, rather than left running as it was. */
   made?: boolean;
@@ -1318,7 +1326,12 @@ export type WatchEvent =
     | ({ type: 'face' | 'face.end' } & WatchFace)
     | { type: 'motion' | 'motion.end' | 'source.back' }
     | { type: 'source.lost'; reason: string }
+    | ({ type: 'clip' } & WatchClip)
+    | { type: 'clip.failed'; clip: string; reason: string }
   );
+
+/** A clip a watch cut, an MP4 EMS keeps until it is dropped: its id, when it starts and ends, its length in seconds, its bytes, and what opened it. */
+export type WatchClip = { clip: string; start: string; end: string; duration: number; size: number; reasons: ('face' | 'motion' | 'request')[] };
 
 /** A watch's route on the instance the command calls, answered as an op's envelope is. */
 const watchRequest = async (cmd: Command, method: string, path: string, body?: unknown): Promise<unknown> => {
@@ -1359,6 +1372,37 @@ export const listWatches = async (cmd: Command): Promise<WatchStatus[]> => await
 /** Stop the watch `id`. */
 export const deleteWatch = async (cmd: Command, id: string): Promise<void> => {
   await watchRequest(cmd, 'DELETE', `watches/${encodeURIComponent(id)}`);
+};
+
+/** Open a clip of the watch `id` now, or lengthen the open one, `post` seconds on; answers its id. */
+export const requestClip = async (cmd: Command, id: string, post?: number): Promise<string> =>
+  (await watchRequest(cmd, 'POST', `watches/${encodeURIComponent(id)}/clips`, post === undefined ? {} : { post }) as { clip: string }).clip;
+
+/** The clip `clip` of the watch `id`: its MP4's bytes as they come. */
+export const clipBody = async (cmd: Command, id: string, clip: string): Promise<ReadableStream<Uint8Array>> => {
+  const instance = await emsInstance(cmd);
+  let response: Response;
+  try {
+    response = await fetch(`${instance.url}/${API_MAJOR}/watches/${encodeURIComponent(id)}/clips/${encodeURIComponent(clip)}`, { headers: headers(instance) });
+  } catch (error) {
+    throw new EmsUnavailableError(`${who(instance)}: clip ${clip} unreachable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (!response.ok || !response.body) {
+    const envelope = await response.json().catch(() => undefined) as Envelope | undefined;
+    throw new EmsError(
+      'watches',
+      envelope?.error?.code ?? `http_${response.status}`,
+      envelope?.error?.message ?? `HTTP ${response.status}`,
+      envelope?.error?.permanent === true,
+      response.status,
+    );
+  }
+  return response.body;
+};
+
+/** Drop the clip `clip` of the watch `id` from EMS. */
+export const dropClip = async (cmd: Command, id: string, clip: string): Promise<void> => {
+  await watchRequest(cmd, 'DELETE', `watches/${encodeURIComponent(id)}/clips/${encodeURIComponent(clip)}`);
 };
 
 /**

@@ -13,9 +13,11 @@ import { type Command, STEP_EXIT_TEMPORARY } from '@ein/client';
 import type { DetectVideoFacesResult } from '../lib/client.ts';
 import {
   activeSpeakers,
+  clipBody,
   deleteWatch,
   detectFaces,
   detectVideoFaces,
+  dropClip,
   embedImage,
   embedImageText,
   embedTexts,
@@ -29,6 +31,7 @@ import {
   isFileFault,
   listWatches,
   putWatch,
+  requestClip,
   stepExitCode,
   transcodeVideo,
   transcribe,
@@ -471,6 +474,22 @@ Deno.test('a search the primary cannot answer goes to an instance that stamps it
   }
 });
 
+Deno.test("a watch's clip is asked for, fetched and dropped, and one EMS lacks is refused", async () => {
+  const stub = startStubEms();
+  try {
+    const { cmd } = makeCmd({ CFG_EMS_URL: stub.url });
+    await putWatch(cmd, 'ein-porch-sub', { source: 'rtsp://192.0.2.1:8554/porch-sub', clips: { on: ['face'], source: 'rtsp://192.0.2.1:8554/porch-main' } });
+    const asked = await requestClip(cmd, 'ein-porch-sub', 5);
+    stub.clips.set(`ein-porch-sub/${asked}`, new Uint8Array([1, 2, 3]));
+    assertEquals(new Uint8Array(await new Response(await clipBody(cmd, 'ein-porch-sub', asked)).arrayBuffer()), new Uint8Array([1, 2, 3]));
+    await dropClip(cmd, 'ein-porch-sub', asked);
+    assertEquals(stub.clips.size, 0);
+    await assertRejects(() => clipBody(cmd, 'ein-porch-sub', asked), EmsError, 'no clip');
+  } finally {
+    await stub.close();
+  }
+});
+
 Deno.test('a watch is put, listed and followed until it is deleted, and one EMS lacks is refused', async () => {
   const stub = startStubEms();
   try {
@@ -490,6 +509,7 @@ Deno.test('a watch is put, listed and followed until it is deleted, and one EMS 
     await following;
     assertEquals(heard.map((event) => event.type), ['motion', 'face']);
     assertEquals(stub.watches.size, 0);
+    await assertRejects(() => clipBody(cmd, 'ein-front-door-sub', 'gone'), EmsError, 'no watch');
     await assertRejects(
       () =>
         (async () => {

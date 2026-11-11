@@ -2,7 +2,7 @@
  * A stand-in EMS on loopback for the fast tier: answers each op from a table, records what it
  * was asked, and speaks the real envelope (`{ok, result, meta}` / `{ok:false, error}`), so a
  * caller's handling of both is what gets exercised — never a model. Its watches are kept as they
- * are put, and a test tells their events (`tell`).
+ * are put, a test tells their events (`tell`), and their clips are what a test puts in `clips`.
  *
  * It serves itself the files of its requests as `ems-files` serves EMS, in the same process: the
  * client sends names, and what the stub records and hands its handlers is the file each stands
@@ -26,6 +26,8 @@ export type StubEms = {
   hungUp: string[];
   /** The watches put, by id, each with the spec it was given. */
   watches: Map<string, Record<string, unknown>>;
+  /** Each watch's clips, by `<watch>/<clip>`: what a test puts here is fetched, dropped and asked for. */
+  clips: Map<string, Uint8Array<ArrayBuffer>>;
   /** Send an event to whoever follows the watch `id`'s events; answers how many do. */
   tell: (id: string, event: Record<string, unknown>) => number;
   close: () => Promise<void>;
@@ -87,15 +89,32 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
   const requests: StubEms['requests'] = [];
   const hungUp: string[] = [];
   const watches = new Map<string, Record<string, unknown>>();
+  const clips = new Map<string, Uint8Array<ArrayBuffer>>();
   const followers = new Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>();
   const encoder = new TextEncoder();
   const sse = (event: string, data: unknown) => encoder.encode(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
   const ok = (result: unknown) => Response.json({ ok: true, result, meta: { api: '0.3.5' } });
   const watchRoute = async (req: Request, path: string): Promise<Response> => {
-    const [, id, events] = path.split('/').map(decodeURIComponent);
+    const [, id, events, clip] = path.split('/').map(decodeURIComponent);
+    const notFound = (what: string) => Response.json({ ok: false, error: { code: 'not_found', message: `no ${what}` } }, { status: 404 });
     if (!id && req.method === 'GET') return ok([...watches].map(([each, spec]) => watchStatus(each, spec)));
+    if (id && events === 'clips') {
+      if (!watches.has(id)) return notFound(`watch ${id}`);
+      if (!clip && req.method === 'POST') {
+        const asked = `asked-${clips.size + 1}`;
+        clips.set(`${id}/${asked}`, new Uint8Array());
+        return ok({ clip: asked });
+      }
+      const bytes = clips.get(`${id}/${clip}`);
+      if (!bytes) return notFound(`clip ${clip}`);
+      if (req.method === 'GET') return new Response(bytes, { headers: { 'content-type': 'video/mp4' } });
+      if (req.method === 'DELETE') {
+        clips.delete(`${id}/${clip}`);
+        return ok(null);
+      }
+    }
     if (id && events === 'events' && req.method === 'GET') {
-      if (!watches.has(id)) return Response.json({ ok: false, error: { code: 'not_found', message: `no watch ${id}` } }, { status: 404 });
+      if (!watches.has(id)) return notFound(`watch ${id}`);
       let follower: ReadableStreamDefaultController<Uint8Array>;
       const stream = new ReadableStream<Uint8Array>({
         start(controller) {
@@ -198,6 +217,7 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
     requests,
     hungUp,
     watches,
+    clips,
     tell: (id, event) => {
       const each = followers.get(id) ?? new Set();
       for (const follower of each) follower.enqueue(sse(String(event.type), { watch: id, at: new Date().toISOString(), t: 0, ...event }));

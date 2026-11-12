@@ -903,6 +903,49 @@ export const denoise = async (
   return restored(await request(cmd, 'image.denoise', body, restoreCall(call)), opts.output);
 };
 
+/** One edit of a picture, as an XMP history event: `edited`, when (ISO 8601), by what and how. */
+export type PictureEdit = { action: string; when?: string; softwareAgent?: string; parameters?: string; changed?: string };
+
+type CopyTagsOptions = {
+  /** The file whose metadata is copied: EXIF, GPS, XMP, IPTC and the colour profile, less its orientation and thumbnail. */
+  source: string;
+  /** Written in `path`'s format, so its name ends in `path`'s extension. */
+  output: string;
+  /** `path`'s turn, written as its EXIF Orientation. */
+  angle?: number;
+  mirror?: boolean;
+  /** Appended to the source's XMP history. */
+  history?: PictureEdit[];
+  /** A term of IPTC's digital source type vocabulary, such as `compositeWithTrainedAlgorithmicMedia`. */
+  digitalSourceType?: string;
+};
+
+/**
+ * `path` with the metadata of another file (`image.copy_tags`), written into `output`: for a
+ * picture made from it, whose pixels are new but whose date, camera and place are the other's.
+ * Its pixels are not touched.
+ */
+export const copyTags = async (
+  cmd: Command,
+  path: string,
+  opts: CopyTagsOptions,
+  call: RestoreCallOptions = {},
+): Promise<{ path: string; bytes: number; producer: string }> => {
+  const body: Record<string, unknown> = { file: fileRef(path, opts.angle ?? 0, opts.mirror ?? false), source: { path: opts.source }, output: { path: opts.output } };
+  if (opts.history?.length) {
+    body.history = opts.history.map((edit) => ({
+      action: edit.action,
+      ...(edit.when ? { when: edit.when } : {}),
+      ...(edit.softwareAgent ? { software_agent: edit.softwareAgent } : {}),
+      ...(edit.parameters ? { parameters: edit.parameters } : {}),
+      ...(edit.changed ? { changed: edit.changed } : {}),
+    }));
+  }
+  if (opts.digitalSourceType) body.digital_source_type = opts.digitalSourceType;
+  const answer = await request(cmd, 'image.copy_tags', body, restoreCall(call));
+  return { path: opts.output, bytes: (answer.result as { bytes: number }).bytes, producer: producerOf(answer) };
+};
+
 type PosterOptions = RenditionsOptions & {
   /** Seconds into the clip; EMS defaults to 1, past the black leader most cameras record. */
   at?: number;

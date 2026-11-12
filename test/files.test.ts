@@ -104,6 +104,28 @@ Deno.test('forRequest: every file and output at any depth goes by its name', asy
   }
 });
 
+Deno.test('forRequest: a mask is read like the file it marks', async () => {
+  filesState().endpoints.set(EMS_URL, { address: 'ein.test:2224', emsUrl: EMS_URL, secret: '5ec7e7' });
+  try {
+    const cmd = vfsOf({
+      '/archive/a/print.tif': '/files/02/02EXAMPLE',
+      '/archive/a/print.tif/versions/.tmp-mask.png': '/files/04/04EXAMPLE',
+      '/archive/a/print.tif/versions/.tmp-fill.png': '/files/05/05EXAMPLE',
+    });
+    const sent = (await forRequest(cmd, EMS_URL, {
+      file: { path: '/archive/a/print.tif' },
+      mask: { path: '/archive/a/print.tif/versions/.tmp-mask.png' },
+      output: { path: '/archive/a/print.tif/versions/.tmp-fill.png' },
+    }))!;
+    const body = sent.body as Record<'file' | 'mask' | 'output', { path: string }>;
+    assertEquals(lookup(body.mask.path), { mode: 'read', disk: '/files/04/04EXAMPLE' });
+    assertEquals(lookup(body.output.path), { mode: 'write', disk: '/files/05/05EXAMPLE' });
+    await sent.release();
+  } finally {
+    filesState().endpoints.delete(EMS_URL);
+  }
+});
+
 Deno.test('forRequest: a body that names no file goes as it is; one that does needs an endpoint', async () => {
   const cmd = vfsOf({ '/archive/a/IMG_0001.JPG': '/files/01/01EXAMPLE' });
   const body = { texts: ['Anna Andersson'] };

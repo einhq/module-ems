@@ -66,7 +66,7 @@ const unnamed = (value: unknown): unknown => {
   const out: Record<string, unknown> = {};
   for (const [key, child] of Object.entries(value)) {
     const ref = child as Record<string, unknown>;
-    const named = (key === 'file' || key === 'output') && ref && typeof ref.path === 'string' ? lookup(ref.path) : undefined;
+    const named = (key === 'file' || key === 'mask' || key === 'output') && ref && typeof ref.path === 'string' ? lookup(ref.path) : undefined;
     out[key] = named && named !== 'directory' ? { ...ref, path: named.disk ?? named.node } : unnamed(child);
   }
   return out;

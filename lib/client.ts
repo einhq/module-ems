@@ -805,6 +805,104 @@ export const renditions = async (cmd: Command, path: string, opts: RenditionsOpt
   return renditionsOf(answer.result as { frame: { width: number; height: number }; targets: Rendition[] }, opts.targets, answer);
 };
 
+/**
+ * How a restoration op is called: `interactive` when a person waits for it, which puts it ahead of
+ * batch work in its model's queue without giving up on it, since a large scan takes minutes.
+ */
+export type RestoreCallOptions = { interactive?: boolean; onProgress?: (phase: string) => void | Promise<void> };
+
+/**
+ * A picture a restoration op wrote into `output`, at its source's own depth and channels, without
+ * metadata, as stored (no turn applied).
+ */
+export type RestoredPicture = { path: string; width: number; height: number; channels: number; depth: number; bytes: number; producer: string };
+
+type RestoreOutput = { output: string; format?: 'png' | 'tiff' };
+
+const restoreCall = (opts: RestoreCallOptions): CallOptions => ({
+  ...(opts.interactive ? { priority: 'interactive' as const } : {}),
+  ...(opts.onProgress ? { onProgress: opts.onProgress } : { stream: true }),
+});
+
+const restored = (answer: Answer, output: string): RestoredPicture => {
+  const raw = answer.result as Omit<RestoredPicture, 'producer'>;
+  return { path: output, width: raw.width, height: raw.height, channels: raw.channels, depth: raw.depth, bytes: raw.bytes, producer: producerOf(answer) };
+};
+
+const outputBody = (opts: RestoreOutput): Record<string, unknown> => ({ path: opts.output, ...(opts.format ? { format: opts.format } : {}) });
+
+/**
+ * A faded colour print's colours back (`image.unfade`): each channel stretched between its own
+ * black and white point, then its most neutral tones balanced to grey. Deterministic, no model.
+ */
+export const unfade = async (
+  cmd: Command,
+  path: string,
+  opts: RestoreOutput & { clip?: number; balance?: boolean; strength?: number },
+  call: RestoreCallOptions = {},
+): Promise<RestoredPicture & { levels: [number, number][]; gammas: number[] }> => {
+  const body: Record<string, unknown> = { file: fileRef(path), output: outputBody(opts) };
+  if (opts.clip !== undefined) body.clip = opts.clip;
+  if (opts.balance !== undefined) body.balance = opts.balance;
+  if (opts.strength !== undefined) body.strength = opts.strength;
+  const answer = await request(cmd, 'image.unfade', body, restoreCall(call));
+  const raw = answer.result as { levels: [number, number][]; gammas: number[] };
+  return { ...restored(answer, opts.output), levels: raw.levels, gammas: raw.gammas };
+};
+
+/** The dust and scratches of a scanned print (`image.defects`): a one-channel PNG mask, 255 where marked. */
+export type DefectsResult = { path: string; width: number; height: number; marked: number; fraction: number; producer: string };
+
+/**
+ * Where a scanned print is damaged, as the mask `inpaint` takes, written into `output` (a PNG).
+ * `dark` looks for damage darker than the picture too. A guess: wrong where the picture itself
+ * has thin light or dark lines.
+ */
+export const findDefects = async (
+  cmd: Command,
+  path: string,
+  opts: { output: string; scale?: number; threshold?: number; dark?: boolean },
+  call: RestoreCallOptions = {},
+): Promise<DefectsResult> => {
+  const body: Record<string, unknown> = { file: fileRef(path), output: { path: opts.output } };
+  if (opts.scale !== undefined) body.scale = opts.scale;
+  if (opts.threshold !== undefined) body.threshold = opts.threshold;
+  if (opts.dark !== undefined) body.dark = opts.dark;
+  const answer = await request(cmd, 'image.defects', body, restoreCall(call));
+  const raw = answer.result as Omit<DefectsResult, 'path' | 'producer'>;
+  return { path: opts.output, width: raw.width, height: raw.height, marked: raw.marked, fraction: raw.fraction, producer: producerOf(answer) };
+};
+
+/**
+ * The pixels `mask` marks filled from what surrounds them (`image.inpaint`); every other pixel is
+ * the picture's. `ns` and `telea` (OpenCV) suit dust and thin scratches, `lama` creases and tears.
+ */
+export const inpaint = async (
+  cmd: Command,
+  path: string,
+  opts: RestoreOutput & { mask: string; method?: 'telea' | 'ns' | 'lama'; radius?: number },
+  call: RestoreCallOptions = {},
+): Promise<RestoredPicture & { filled: number }> => {
+  const body: Record<string, unknown> = { file: fileRef(path), mask: { path: opts.mask }, output: outputBody(opts) };
+  if (opts.method) body.method = opts.method;
+  if (opts.radius !== undefined) body.radius = opts.radius;
+  const answer = await request(cmd, 'image.inpaint', body, restoreCall(call));
+  return { ...restored(answer, opts.output), filled: (answer.result as { filled: number }).filled };
+};
+
+/** A picture with less grain and noise (`image.denoise`, SCUNet); `strength` blends with the picture. */
+export const denoise = async (
+  cmd: Command,
+  path: string,
+  opts: RestoreOutput & { noise?: '15' | '25' | 'real'; strength?: number },
+  call: RestoreCallOptions = {},
+): Promise<RestoredPicture> => {
+  const body: Record<string, unknown> = { file: fileRef(path), output: outputBody(opts) };
+  if (opts.noise) body.noise = opts.noise;
+  if (opts.strength !== undefined) body.strength = opts.strength;
+  return restored(await request(cmd, 'image.denoise', body, restoreCall(call)), opts.output);
+};
+
 type PosterOptions = RenditionsOptions & {
   /** Seconds into the clip; EMS defaults to 1, past the black leader most cameras record. */
   at?: number;

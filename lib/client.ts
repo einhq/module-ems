@@ -815,7 +815,7 @@ export type RestoreCallOptions = { interactive?: boolean; onProgress?: (phase: s
  * A picture a restoration op wrote into `output`, at its source's own depth and channels, without
  * metadata, as stored (no turn applied).
  */
-export type RestoredPicture = { path: string; width: number; height: number; channels: number; depth: number; bytes: number; producer: string };
+type RestoredPicture = { path: string; width: number; height: number; channels: number; depth: number; bytes: number; producer: string };
 
 type RestoreOutput = { output: string; format?: 'png' | 'tiff' };
 
@@ -851,7 +851,7 @@ export const unfade = async (
 };
 
 /** The dust and scratches of a scanned print (`image.defects`): a one-channel PNG mask, 255 where marked. */
-export type DefectsResult = { path: string; width: number; height: number; marked: number; fraction: number; producer: string };
+type DefectsResult = { path: string; width: number; height: number; marked: number; fraction: number; producer: string };
 
 /**
  * Where a scanned print is damaged, as the mask `inpaint` takes, written into `output` (a PNG).

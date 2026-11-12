@@ -126,6 +126,28 @@ Deno.test('forRequest: a mask is read like the file it marks', async () => {
   }
 });
 
+Deno.test('forRequest: a source whose tags are copied is read like the file', async () => {
+  filesState().endpoints.set(EMS_URL, { address: 'ein.test:2224', emsUrl: EMS_URL, secret: '5ec7e7' });
+  try {
+    const cmd = vfsOf({
+      '/archive/a/print.jpg': '/files/02/02EXAMPLE',
+      '/archive/a/print.jpg/versions/.tmp-fill.png': '/files/05/05EXAMPLE',
+      '/archive/a/print.jpg/versions/.tmp-tags.png': '/files/06/06EXAMPLE',
+    });
+    const sent = (await forRequest(cmd, EMS_URL, {
+      file: { path: '/archive/a/print.jpg/versions/.tmp-fill.png' },
+      source: { path: '/archive/a/print.jpg' },
+      output: { path: '/archive/a/print.jpg/versions/.tmp-tags.png' },
+    }))!;
+    const body = sent.body as Record<'file' | 'source' | 'output', { path: string }>;
+    assertEquals(lookup(body.source.path), { mode: 'read', disk: '/files/02/02EXAMPLE' });
+    assert(body.output.path.endsWith('.png'));
+    await sent.release();
+  } finally {
+    filesState().endpoints.delete(EMS_URL);
+  }
+});
+
 Deno.test('forRequest: a body that names no file goes as it is; one that does needs an endpoint', async () => {
   const cmd = vfsOf({ '/archive/a/IMG_0001.JPG': '/files/01/01EXAMPLE' });
   const body = { texts: ['Anna Andersson'] };

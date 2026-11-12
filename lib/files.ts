@@ -127,7 +127,7 @@ export const grant = async (
 };
 
 /**
- * For one request to `emsUrl`: the body to send, each `file.path` and `mask.path` (read) and
+ * For one request to `emsUrl`: the body to send, each `file.path`, `mask.path` and `source.path` (read) and
  * `output.path` (written) in it at any depth replaced by its name, the header naming the endpoint, and `release`,
  * which ends the names. A body that names no file goes as it is; one that does, when nothing serves
  * `emsUrl` its files, is undefined.
@@ -146,7 +146,7 @@ export const forRequest = async <T>(
     for (const [key, child] of Object.entries(value)) {
       out[key] = copy(child);
       const ref = out[key] as Record<string, unknown>;
-      if ((key === 'file' || key === 'mask' || key === 'output') && ref && typeof ref === 'object' && typeof ref.path === 'string') {
+      if ((key === 'file' || key === 'mask' || key === 'source' || key === 'output') && ref && typeof ref === 'object' && typeof ref.path === 'string') {
         paths.push({ path: ref.path, mode: key === 'output' ? 'write' : 'read' });
         refs.push(ref);
       }

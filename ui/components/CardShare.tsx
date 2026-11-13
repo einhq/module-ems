@@ -11,12 +11,15 @@ const CONTEXT_MB = 400;
 
 const STEP_MB = 256;
 
+/** How long a share let go of waits for EMS to report it before the slider shows what EMS says again. */
+const REPORT_WAIT_MS = 30_000;
+
 /**
  * The media service's share of the graphics card, under the card's bar: a slider from none of it,
  * every model on the processor, to the whole card. Letting go of it sets `CFG_EMS_CARD_SHARE_MB`,
- * which the `ems-link` service gives EMS; until EMS reports the new share, the slider stays where it
- * was let go. Under it, what EMS and the card's other tenants hold now, and which models the share
- * keeps on the processor.
+ * which the `ems-link` service gives EMS; until EMS reports the new share, for half a minute at
+ * most, the slider stays where it was let go. Under it, what EMS and the card's other tenants hold
+ * now, and which models the share keeps on the processor.
  */
 export function CardShare({ status, total }: { status: Running; total: number }) {
   const reported = status.card?.shareMb;
@@ -24,7 +27,13 @@ export function CardShare({ status, total }: { status: Running; total: number })
   const [moving, setMoving] = useState<number>();
   const [sent, setSent] = useState<number>();
   useEffect(() => {
-    if (sent !== undefined && Math.round(sent) === Math.round(now)) setSent(undefined);
+    if (sent === undefined) return;
+    if (Math.round(sent) === Math.round(now)) {
+      setSent(undefined);
+      return;
+    }
+    const timer = setTimeout(() => setSent(undefined), REPORT_WAIT_MS);
+    return () => clearTimeout(timer);
   }, [now, sent]);
   const shown = moving ?? sent ?? now;
 

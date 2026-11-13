@@ -750,7 +750,7 @@ export type RenditionFit = 'contain' | 'cover' | 'fill';
 type RenditionFormat = 'avif' | 'webp' | 'jpeg' | 'png';
 
 /**
- * One output of `image.renditions` (and of `video.poster` / `audio.waveform`, which fit their
+ * One output of `image.renditions` (and of `video.poster` / `audio.waveform` / `document.renditions`, which fit their
  * one picture the same way). `output` is the VFS path of the node whose bytes EMS writes — the
  * caller creates it first and syncs it afterwards; EMS never learns what the node is called.
  */
@@ -982,6 +982,39 @@ export const waveform = async (cmd: Command, path: string, opts: WaveformOptions
   if (opts.style) body.style = opts.style;
   const answer = await request(cmd, 'audio.waveform', body);
   return renditionsOf(answer.result as { targets: Rendition[] }, opts.targets, answer);
+};
+
+type DocumentRenditionsOptions = { mimetype?: string; targets: RenditionTarget[]; pdf?: string };
+
+/** What `document.renditions` answers: the pictures, the document's pages, its first page's size in points, and the PDF. */
+type DocumentRenditionsResult = RenditionsResult & { pages: number; page: { width: number; height: number }; pdf?: { path: string; bytes: number } };
+
+/**
+ * A document's first page cut into the targets, from one rendering, and with `pdf` the document as
+ * PDF there: a Word, RTF, OpenDocument or text file converted by LibreOffice. A PDF is rendered as
+ * it is, and asked for no `pdf`.
+ */
+export const documentRenditions = async (cmd: Command, path: string, opts: DocumentRenditionsOptions): Promise<DocumentRenditionsResult> => {
+  const outputs = opts.targets.map((t) => t.output);
+  const body: Record<string, unknown> = {
+    file: { path, ...(opts.mimetype ? { mimetype: opts.mimetype } : {}) },
+    targets: targetBodies(opts.targets, outputs),
+  };
+  if (opts.pdf) body.pdf = { output: { path: opts.pdf } };
+  const answer = await request(cmd, 'document.renditions', body);
+  const raw = answer.result as {
+    frame: { width: number; height: number };
+    targets: Rendition[];
+    pages: number;
+    page: { width: number; height: number };
+    pdf?: { bytes: number };
+  };
+  return {
+    ...renditionsOf(raw, opts.targets, answer),
+    pages: raw.pages,
+    page: raw.page,
+    ...(raw.pdf && opts.pdf ? { pdf: { path: opts.pdf, bytes: raw.pdf.bytes } } : {}),
+  };
 };
 
 type VideoTranscodeOptions = {

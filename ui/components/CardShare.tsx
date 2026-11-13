@@ -73,9 +73,13 @@ export function CardShare({ status, total }: { status: Running; total: number })
         onChange={setMoving}
         onChangeEnd={save}
         label={(value) => (value >= total ? 'the whole card' : size(value))}
-        marks={[{ value: 0, label: 'none' }, { value: total, label: 'all' }]}
-        mb='md'
+        marks={[{ value: 0 }, { value: total }]}
       />
+      {/* The ends' names in a row of their own: a mark's label is centred on its end and would stand out of the card. */}
+      <Group justify='space-between' mt={-2} mb={4}>
+        <Text size='xs' c='dimmed'>none</Text>
+        <Text size='xs' c='dimmed'>all</Text>
+      </Group>
       <Text size='xs' c='dimmed'>
         The media service's models hold {share}
         {shown === 0 ? ', so every one of them runs on the processor' : ''}. It holds {size(ems)} now

@@ -117,6 +117,7 @@ const GENERATION_OF: Record<string, (capabilities: EmsCapabilities) => unknown> 
   'faces.detect_video': (c) => c.models?.faces,
   'faces.embed': (c) => c.models?.faces,
   'ocr.read': (c) => c.models?.ocr,
+  'image.damage': (c) => c.models?.damage,
 };
 
 /**

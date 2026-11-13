@@ -25,6 +25,7 @@ import {
   EmsNotServedError,
   EmsUnavailableError,
   extractText,
+  findDamage,
   fingerprint,
   generations,
   health,
@@ -379,8 +380,25 @@ Deno.test('health and the generations come from the system endpoints', async () 
       imageEmbed: null,
       faces: null,
       ocr: null,
+      damage: null,
       textEmbed: null,
     });
+  } finally {
+    await stub.close();
+  }
+});
+
+Deno.test('how damaged a picture is comes back with its measures, and the damage generation with image.damage', async () => {
+  const result = { width: 400, height: 300, faded: 0.8, dusty: 0.1, scratched: 0, measures: { change: 18.8, specks: 30, scratches: 0, length: 0, marked: 0.002 } };
+  const stub = startStubEms({
+    ops: { 'image.damage': { result, producer: 'damage/1+bopb-detection' } },
+    capabilities: { models: { damage: 'damage/1+bopb-detection' } },
+  });
+  try {
+    const { cmd } = makeCmd({ CFG_EMS_URL: stub.url });
+    assertEquals(await findDamage(cmd, '/tmp/print.jpg'), { ...result, producer: 'damage/1+bopb-detection' });
+    assertEquals(stub.requests[0].body.file, { path: '/tmp/print.jpg', angle: 0, mirror: false });
+    assertEquals((await generations(cmd))?.damage, 'damage/1+bopb-detection');
   } finally {
     await stub.close();
   }

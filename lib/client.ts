@@ -878,6 +878,28 @@ export const findDefects = async (
 };
 
 /**
+ * How damaged a picture is (`image.damage`), each from 0 (none) to 1 (as much as a picture worth
+ * restoring for it has): `faded` from the change `unfade` would make, `dusty` and `scratched` from
+ * the specks and scratches `findDefects`'s detector marks. `measures` are what the scores come from.
+ */
+type DamageResult = {
+  width: number;
+  height: number;
+  faded: number;
+  dusty: number;
+  scratched: number;
+  measures: { change: number; specks: number; scratches: number; length: number; marked: number };
+  producer: string;
+};
+
+/** How faded, dusty and scratched the picture at `path` is, as stored; it is only read. */
+export const findDamage = async (cmd: Command, path: string, call: RestoreCallOptions = {}): Promise<DamageResult> => {
+  const answer = await request(cmd, 'image.damage', { file: fileRef(path) }, restoreCall(call));
+  const raw = answer.result as Omit<DamageResult, 'producer'>;
+  return { width: raw.width, height: raw.height, faded: raw.faded, dusty: raw.dusty, scratched: raw.scratched, measures: raw.measures, producer: producerOf(answer) };
+};
+
+/**
  * The pixels `mask` marks filled from what surrounds them (`image.inpaint`); every other pixel is
  * the picture's. `ns` and `telea` (OpenCV) suit dust and thin scratches, `lama` creases and tears.
  */
@@ -1414,6 +1436,8 @@ type Generations = {
   faces: string | null;
   /** The engine `ocr.read` reads pictures with (`ocrBy`). */
   ocr: string | null;
+  /** The method and model `image.damage` reads damage with (`damageBy`). */
+  damage: string | null;
   /** The text embedder `text.embed` runs (`embeddedBy` of a text vector). */
   textEmbed: string | null;
 };
@@ -1441,6 +1465,7 @@ export const generations = async (cmd: Command, waitSeconds?: number): Promise<G
     imageEmbed: ran('vision.embed', models.image_embed),
     faces: ran('faces.detect', models.faces),
     ocr: ran('ocr.read', models.ocr),
+    damage: ran('image.damage', models.damage),
     textEmbed: named(models.text_embed),
   };
 };

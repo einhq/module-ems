@@ -239,7 +239,7 @@ export type EmsCapabilities = {
   /** The ops it serves. */
   ops?: string[];
   tools?: Record<string, string>;
-  models?: { text_embed?: string; whisper?: string; faces?: string; image_embed?: string; ocr?: string };
+  models?: { text_embed?: string; whisper?: string; faces?: string; image_embed?: string; ocr?: string; damage?: string };
   limits?: { models?: number; tools?: number; encodes?: number; queue_depth?: number; interactive_reserve?: number };
   encode?: { video_encoder?: string; cpu_budget?: string };
   /**

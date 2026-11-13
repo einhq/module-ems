@@ -374,6 +374,7 @@ Deno.test('health and the generations come from the system endpoints', async () 
     assertEquals(status?.degraded?.[0].what, 'gpu');
     assertEquals(await generations(cmd), {
       transcribe: 'whisper-large-v3:vad=0.2/400/500,nospeech=0.6,lang=auto,words=0',
+      transcribeCurrent: ['whisper-large-v3:vad=0.2/400/500,nospeech=0.6,lang=auto,words=0'],
       cpuBudget: null,
       imageEmbed: null,
       faces: null,

@@ -1,8 +1,4 @@
-/**
- * What ems offers others through settings: `ems-text-embed`, the text embedder `CFG_TEXT_EMBEDDER`
- * names (ems's `etc/config`), and `ems-status --card`, the card's mode alone for whatever shares
- * the card and follows it.
- */
+/** What ems offers others through settings: `ems-text-embed`, the text embedder `CFG_TEXT_EMBEDDER` names (ems's `etc/config`). */
 
 import { assertEquals } from '@std/assert';
 import type { TextEmbedding } from '@ein/api';
@@ -15,14 +11,8 @@ Deno.test({ name: 'ems commands for others', sanitizeResources: false, sanitizeO
   await testCtx.setup();
   const client = await testCtx.server.createShellClient();
   const cmd = testCommands(client);
-  let mode = 'busy';
   const ems = startStubEms({
     capabilities: { models: { text_embed: 'text-model-1' } },
-    health: {
-      get card() {
-        return { mode };
-      },
-    },
     ops: {
       'text.embed': (body) => ({ result: { embeddings: (body.texts as string[]).map((text) => [text.length, body.role === 'query' ? 1 : 0]) }, producer: 'text-model-1' }),
     },
@@ -41,13 +31,6 @@ Deno.test({ name: 'ems commands for others', sanitizeResources: false, sanitizeO
       assertEquals(await client.execJson<TextEmbedding>(`${at} ems-text-embed --model`), { model: 'text-model-1', vectors: [] });
       await cmd.shouldFailWith(`${at} ems-text-embed`, 'missing text');
       await cmd.shouldFailWith('CFG_EMS_URL=http://127.0.0.1:1 ems-text-embed hej', 'ems-text-embed:');
-    });
-
-    await t.step('the card mode alone, and a failure when EMS cannot say', async () => {
-      assertEquals((await client.execString(`JSON_OUTPUT=0 ${at} ems-status --card`)).trim(), 'busy');
-      mode = 'quiet';
-      assertEquals(await client.execJson(`${at} ems-status --card`), { mode: 'quiet' });
-      assertEquals((await client.exec('CFG_EMS_URL=http://127.0.0.1:1 ems-status --card')).success, false);
     });
   } finally {
     await ems.close();

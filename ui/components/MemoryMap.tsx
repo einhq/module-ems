@@ -1,6 +1,7 @@
 import { Box, Card, Group, Stack, Text, Title, Tooltip } from '@mantine/core';
 import { TablerIcon } from '@ein/ui/components';
 import type { EmsStatus } from '@ems/api';
+import { CardShare } from './CardShare.tsx';
 import { CARD_COLOR, holdingsOf, RAM_COLOR, size } from './holdings.ts';
 
 type Running = Extract<EmsStatus, { running: true }>;
@@ -11,6 +12,9 @@ const CHAT_COLOR = 'var(--mantine-color-grape-6)';
 const RUNTIME_COLOR = 'var(--mantine-color-teal-9)';
 const WORKER_COLOR = 'var(--mantine-color-blue-9)';
 const FREE_COLOR = 'var(--mrx-surface-overlay)';
+
+/** The primary instance's name: its share of the card is EiN's setting, another's is its own. */
+const PRIMARY = 'main';
 
 /** A bar of what holds a memory, each part labelled inside it where it fits and in its tooltip. */
 function Bar({ segments, total }: { segments: Segment[]; total: number }) {
@@ -47,7 +51,8 @@ function Bar({ segments, total }: { segments: Segment[]; total: number }) {
  * it, EMS's own runtime there, the chat model and whatever else shares the card, and what is free;
  * and EMS's RAM, split into each model held there and its workers' own memory. A search model kept
  * in RAM while its card copy answers is hatched, as standby: it is what answers the moment indexing
- * takes the card, so search never stops (ein/core#1070).
+ * takes the card, so search never stops (ein/core#1070). Under the card's bar, the primary's share
+ * of it, which a slider sets (`CardShare`), where EMS can change it.
  */
 export function MemoryMap({ status }: { status: Running }) {
   const holdings = holdingsOf(status).filter((holding) => holding.mb !== undefined && holding.mb > 0);
@@ -130,6 +135,7 @@ export function MemoryMap({ status }: { status: Running }) {
           {card.length > 0
             ? <Bar segments={card} total={total!} />
             : <Text size='sm' c='dimmed'>{gpu?.present ? 'The card does not report its memory.' : 'No graphics card.'}</Text>}
+          {card.length > 0 && status.card?.shareMb !== undefined && (status.instance ?? PRIMARY) === PRIMARY && <CardShare status={status} total={total!} />}
         </Stack>
         <Stack gap={6}>
           <Group gap='xs'>

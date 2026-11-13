@@ -47,6 +47,11 @@ export type EmsFamily = {
   model?: string;
   /** The device setting (`auto`, `cpu`, `cuda`), not where a copy actually went. */
   device?: string;
+  /**
+   * What it claims on the card, its weights and what it works with, in MB: a share smaller than
+   * this beside a CUDA context keeps it on the CPU. Absent for a family that never runs there.
+   */
+  cardNeedMb?: number;
   /** What it is for, in a sentence. */
   purpose?: string;
   /** The EMS ops that use it (`vision.describe`). */
@@ -118,8 +123,11 @@ export type EmsStatus =
     degraded: EmsDegradation[];
     families: EmsFamily[];
     requests: EmsRequest[];
-    /** The card mode, when the card is shared. Times are epoch seconds. */
-    card?: { mode: EmsCardMode; since?: number; quietAfter?: number; lastBatch?: number; batchInFlight?: number; searchOnCard: string[] };
+    /**
+     * The card mode, when the card is shared. Times are epoch seconds. `shareMb` is the most of the
+     * card EMS's processes hold, null for all of it, and absent from an EMS that cannot change it.
+     */
+    card?: { mode: EmsCardMode; since?: number; quietAfter?: number; lastBatch?: number; batchInFlight?: number; searchOnCard: string[]; shareMb?: number | null };
     gpu?: {
       present: boolean;
       name?: string;
@@ -234,7 +242,11 @@ export type EmsCapabilities = {
   models?: { text_embed?: string; whisper?: string; faces?: string; image_embed?: string; ocr?: string };
   limits?: { models?: number; tools?: number; encodes?: number; queue_depth?: number; interactive_reserve?: number };
   encode?: { video_encoder?: string; cpu_budget?: string };
-  signatures?: { transcribe?: string };
+  /**
+   * `transcribe`: what a transcript decoded now is stamped with; `transcribe_places`: the same
+   * settings in each place the instance can decode in, which its card's share decides.
+   */
+  signatures?: { transcribe?: string; transcribe_places?: string[] };
 };
 
 /**

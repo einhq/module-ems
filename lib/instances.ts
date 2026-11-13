@@ -92,12 +92,24 @@ export const listInstances = async (cmd: Reader): Promise<EmsInstance[]> => {
 export const instanceName = (cmd: Pick<Command, 'env'>): string => (cmd.env.CFG_EMS_INSTANCE ?? '').trim() || PRIMARY;
 
 /**
+ * The transcript signatures that count as current on an instance: the one it stamps now in each
+ * place it can decode in (`transcribe_places`). Its card's share moves where it decodes at any
+ * time, and a move is no reason to transcribe the archive again. An EMS that does not list the
+ * places has its one signature.
+ */
+export const currentTranscripts = (capabilities: EmsCapabilities): string[] => {
+  const places = capabilities.signatures?.transcribe_places?.filter((signature) => typeof signature === 'string' && signature);
+  if (places?.length) return places;
+  const now = capabilities.signatures?.transcribe;
+  return typeof now === 'string' && now ? [now] : [];
+};
+
+/**
  * Which result of EMS each op's output is stamped with, in `capabilities`: a stored result stamped
  * otherwise is made again, so an instance that stamps an op differently from the primary must not
- * do it. An op not here stamps nothing EiN compares.
+ * do it. An op not here stamps nothing EiN compares; a transcript is `TRANSCRIBED`'s.
  */
 const GENERATION_OF: Record<string, (capabilities: EmsCapabilities) => unknown> = {
-  'speech.transcribe': (c) => c.signatures?.transcribe,
   'text.embed': (c) => c.models?.text_embed,
   'vision.embed': (c) => c.models?.image_embed,
   'vision.embed_text': (c) => c.models?.image_embed,
@@ -108,14 +120,25 @@ const GENERATION_OF: Record<string, (capabilities: EmsCapabilities) => unknown> 
 };
 
 /**
+ * The op whose output another instance stamps as one the primary counts current
+ * (`currentTranscripts`), wherever either decodes, or not at all.
+ */
+const TRANSCRIBED = 'speech.transcribe';
+
+/**
  * The ops of `ops` that `other` stamps otherwise than `primary`: none means `other` may do them.
  * An op the primary does not serve has nothing to match.
  */
 export const generationsDiffer = (primary: EmsCapabilities, other: EmsCapabilities, ops: string[]): string[] =>
   ops.filter((op) => {
+    if (!(primary.ops ?? []).includes(op)) return false;
+    if (op === TRANSCRIBED) {
+      const current = currentTranscripts(primary);
+      const stamp = other.signatures?.transcribe;
+      return current.length > 0 ? !current.includes(stamp ?? '') : Boolean(stamp);
+    }
     const generation = GENERATION_OF[op];
-    if (!generation || !(primary.ops ?? []).includes(op)) return false;
-    return (generation(primary) ?? null) !== (generation(other) ?? null);
+    return generation !== undefined && (generation(primary) ?? null) !== (generation(other) ?? null);
   });
 
 /** Whether `other` serves every op of `ops` and stamps each the way `primary` does. */

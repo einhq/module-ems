@@ -12,6 +12,7 @@
     "./text-embedding": "./lib/text-embedding.ts"
   },
   "imports": {
+    "@ems/card-share": "./lib/card-share.ts",
     "@ems/files": "./lib/files.ts",
     "@ems/files-server": "./lib/files-server.ts",
     "@ems/machine": "./lib/machine.ts",
@@ -64,6 +65,19 @@
           "models",
           "models-second",
           "media-worker"
+        ]
+      },
+      {
+        "key": "CFG_EMS_CARD_SHARE_MB",
+        "scope": "system",
+        "type": "number",
+        "default": "",
+        "label": "Media service's share of the graphics card (MB)",
+        "description": "The most of the graphics card the media service's models hold, in MB; a model that needs more than is left runs on the processor instead, slower. 0 keeps every model on the processor. Leave room for a language model on the same card by lowering it. The media service's page sets it with the slider under the card.",
+        "group": "Media service",
+        "emptyMeans": "the media service's own share (EMS_CARD_SHARE_MB), by default the whole card",
+        "restarts": [
+          "ems-link"
         ]
       },
       {

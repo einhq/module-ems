@@ -34,7 +34,7 @@ const statusOf = async (cmd: Command, instance: EmsInstance): Promise<EmsStatus>
 };
 
 const emsStatus = async (cmd: Command): CmdReturn => {
-  const flags = parseArgs(cmd.args, { boolean: ['brief', 'checks', 'card'], string: ['instance'] });
+  const flags = parseArgs(cmd.args, { boolean: ['brief', 'checks'], string: ['instance'] });
   const name = typeof flags.instance === 'string' && flags.instance ? flags.instance : undefined;
   const instance = await readInstance(cmd, name ?? PRIMARY);
   if (!instance) {
@@ -52,14 +52,6 @@ const emsStatus = async (cmd: Command): CmdReturn => {
 
   const result = await health(cmd, instance);
   const url = instance.url;
-
-  // The card's mode alone, for whatever shares the card and follows it: nothing when EMS cannot say.
-  if (flags.card) {
-    const mode = result?.card?.mode;
-    if (cmd.json) await cmd.writeJSON({ mode: mode ?? null });
-    else if (mode) await cmd.writeLn(mode);
-    return mode ? 0 : 1;
-  }
 
   if (!result) {
     if (cmd.json) {
@@ -113,7 +105,6 @@ emsStatus.spec = {
   flags: [
     { name: 'brief', type: 'bool' as const, description: 'One line, degradation first (used by service-list --detail)' },
     { name: 'checks', type: 'bool' as const, description: 'The checks health reads: answering, model worker, degradations, card' },
-    { name: 'card', type: 'bool' as const, description: "The card's mode alone: quiet, busy, switching or off; fails when EMS cannot say" },
     { name: 'instance', type: 'string' as const, description: 'The instance to ask (ems-instance list); main, the primary, by default, and for --checks every one' },
   ],
 };

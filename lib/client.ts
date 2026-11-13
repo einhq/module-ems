@@ -24,7 +24,7 @@ import type { Command } from '@ein/client';
 import type { EmsCapabilities, EmsDegradation } from '@ems/api';
 import { STEP_EXIT_INPUT, STEP_EXIT_TEMPORARY } from '@ein/client';
 import { forRequest } from './files.ts';
-import { type EmsInstance, instanceName, otherInstanceNames, primaryInstance, readInstance, sameGenerations } from './instances.ts';
+import { currentTranscripts, type EmsInstance, instanceName, otherInstanceNames, primaryInstance, readInstance, sameGenerations } from './instances.ts';
 
 const API_MAJOR = 'v0';
 
@@ -196,6 +196,8 @@ export type HealthResult = {
   families: Record<string, {
     model?: string | null;
     device?: string | null;
+    /** What it claims on the card, in MB (API 0.3.15). */
+    card_need_mb?: number;
     purpose?: string;
     ops?: string[];
     measured?: Record<string, EmsSize>;
@@ -213,10 +215,12 @@ export type HealthResult = {
   /**
    * Who has the card (*3.4*): `busy` while batch model work arrives, `quiet` after `quiet_after`
    * seconds without any, when a card worker holds the search models that fit; `off` with no card.
-   * `plan` is where each family runs in each mode.
+   * `plan` is where each family runs in each mode. `share_mb` (API 0.3.15) is the most of the card
+   * EMS's processes hold, null for all of it (`setCardShare`).
    */
   card?: {
     mode: 'busy' | 'quiet' | 'switching' | 'off';
+    share_mb?: number | null;
     since?: number;
     quiet_after?: number;
     last_batch?: number;
@@ -1394,6 +1398,11 @@ type Generations = {
   /** The `signature` a transcript decoded now would carry (`transcribedWith`). */
   transcribe: string | null;
   /**
+   * Every signature a transcript counts as current with (`currentTranscripts`): `transcribe` in
+   * each place EMS may decode in, as its card's share decides. Empty while `transcribe` is null.
+   */
+  transcribeCurrent: string[];
+  /**
    * The signature of the CPU-decode budget EMS refuses transcodes against. Recorded beside a
    * refusal so a raised budget re-opens the gap on its own: a refusal counts only while the
    * signature it carries is the one in force.
@@ -1427,6 +1436,7 @@ export const generations = async (cmd: Command, waitSeconds?: number): Promise<G
 
   return {
     transcribe: named(capabilities.signatures?.transcribe),
+    transcribeCurrent: currentTranscripts(capabilities),
     cpuBudget: named(capabilities.encode?.cpu_budget),
     imageEmbed: ran('vision.embed', models.image_embed),
     faces: ran('faces.detect', models.faces),
@@ -1507,34 +1517,49 @@ export type WatchEvent =
 /** A clip a watch cut, an MP4 EMS keeps until it is dropped: its id, when it starts and ends, its length in seconds, its bytes, and what opened it. */
 type WatchClip = { clip: string; start: string; end: string; duration: number; size: number; reasons: ('face' | 'motion' | 'request')[] };
 
-/** A watch's route on the instance the command calls, answered as an op's envelope is. */
-const watchRequest = async (cmd: Command, method: string, path: string, body?: unknown): Promise<unknown> => {
-  const instance = await emsInstance(cmd);
+/**
+ * One of `instance`'s routes that is not an op (`watches`, `card`), answered as an op's envelope is.
+ * `what` names it in errors. It waits on nothing, so it may take `ROUTE_REQUEST_MS`.
+ */
+const routeRequest = async (cmd: Command, instance: EmsInstance, what: string, method: string, path: string, body?: unknown): Promise<unknown> => {
   const ems = who(instance);
   let response: Response;
   try {
-    response = await fetchOnce(cmd, `watches ${method}`, `${instance.url}/${API_MAJOR}/${path}`, {
+    response = await fetchOnce(cmd, `${what} ${method}`, `${instance.url}/${API_MAJOR}/${path}`, {
       method,
       headers: headers(instance),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    }, WATCH_REQUEST_MS);
+    }, ROUTE_REQUEST_MS);
   } catch (error) {
-    if (error instanceof ConnectError) throw new EmsUnavailableError(`${ems}: watches unreachable: ${error.message}`);
+    if (error instanceof ConnectError) throw new EmsUnavailableError(`${ems}: ${what} unreachable: ${error.message}`);
     throw error;
   }
   const envelope = await response.json().catch(() => undefined) as Envelope | undefined;
-  if (!envelope) throw new EmsUnavailableError(`${ems}: watches answered ${response.status} with no usable body`);
+  if (!envelope) throw new EmsUnavailableError(`${ems}: ${what} answered ${response.status} with no usable body`);
   if (!envelope.ok) {
     const code = envelope.error?.code ?? `http_${response.status}`;
     const message = envelope.error?.message ?? `HTTP ${response.status}`;
-    if (code === 'busy' || code === 'model_unavailable') throw new EmsUnavailableError(`${ems}: watches ${message} (${code})`);
-    throw new EmsError('watches', code, message, envelope.error?.permanent === true, response.status);
+    if (code === 'busy' || code === 'model_unavailable') throw new EmsUnavailableError(`${ems}: ${what} ${message} (${code})`);
+    throw new EmsError(what, code, message, envelope.error?.permanent === true, response.status);
   }
   return envelope.result;
 };
 
-/** How long a watch's own request may take: it makes, lists or stops one, and waits on nothing. */
-const WATCH_REQUEST_MS = 15_000;
+const ROUTE_REQUEST_MS = 15_000;
+
+/** A watch's route on the instance the command calls. */
+const watchRequest = async (cmd: Command, method: string, path: string, body?: unknown): Promise<unknown> =>
+  await routeRequest(cmd, await emsInstance(cmd), 'watches', method, path, body);
+
+/**
+ * Set the most of its card `instance`'s processes hold (EMS 4.22a), in MB: 0 is none of it, every
+ * model on the CPU, and null all of it. EMS unloads what no longer fits, and answers with the
+ * share and the model copies it unloaded at once; health's `card.share_mb` says it from then on.
+ */
+export const setCardShare = async (cmd: Command, instance: EmsInstance, shareMb: number | null): Promise<{ shareMb: number | null; unloaded: string[] }> => {
+  const result = await routeRequest(cmd, instance, 'card', 'PUT', 'card', { share_mb: shareMb }) as { share_mb?: number | null; unloaded?: string[] };
+  return { shareMb: result.share_mb ?? null, unloaded: result.unloaded ?? [] };
+};
 
 /** Make the watch `id`, or leave it running when EMS has it with this spec already. */
 export const putWatch = async (cmd: Command, id: string, spec: WatchSpec): Promise<WatchStatus> =>

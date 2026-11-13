@@ -1,6 +1,7 @@
 #!ts
 /**
- * ems-link — watches every instance of the media service, as the `ems-link` service.
+ * ems-link — watches every instance of the media service, as the `ems-link` service, and keeps the
+ * primary's card at the share EiN's setting names.
  *
  * EMS is not an EiN service — each instance is a container of its own — but the dashboard reads
  * service rows, and the crawl is blind without one: a backlog that stops draining looks exactly
@@ -13,9 +14,14 @@
  * instead of waiting out its heal. Not on the first build seen of an instance: a restart of EiN is
  * not a new EMS. The workers for an instance stop and start of themselves (`media-pool-kinds
  * --expect`), so nothing here starts or stops them.
+ *
+ * `CFG_EMS_CARD_SHARE_MB`, which restarts this service when it changes, is the share of its card the
+ * primary may hold (`@ems/card-share`): it is given at the start and again whenever the primary's
+ * health reports another, as after EMS restarted with its own.
  */
 
 import { type CmdReturn, type Command, shq } from '@ein/client';
+import { cardShareSetting, keepCardShare } from '@ems/card-share';
 import { capabilitiesOf } from '@ems/client';
 import { listInstances } from '@ems/instances';
 
@@ -35,6 +41,9 @@ const emsLink = async (cmd: Command): CmdReturn => {
   const seconds = Number(cmd.env.CFG_EMS_LINK_INTERVAL_SECONDS) || DEFAULT_INTERVAL_SECONDS;
   const reachable = new Map<string, boolean>();
   const builds = new Map<string, string>();
+  const share = cardShareSetting(cmd.env);
+  /** The last failure to set the share, logged once until another comes. */
+  let shareFailure = '';
   let ending = false;
   stopped.then(() => ending = true);
 
@@ -48,6 +57,17 @@ const emsLink = async (cmd: Command): CmdReturn => {
       if (reachable.get(instance.name) !== up) {
         await cmd.writeLn(`ems-link: ${instance.name} ${up ? `up — ${await brief(cmd, instance.name)}` : `down — ${instance.url} not answering`}`);
         reachable.set(instance.name, up);
+      }
+      if (instance.primary && up && share !== undefined) {
+        try {
+          const done = await keepCardShare(cmd, instance, share);
+          if (done) await cmd.writeLn(`ems-link: ${instance.name} ${done}`);
+          shareFailure = '';
+        } catch (error) {
+          const why = error instanceof Error ? error.message : String(error);
+          if (why !== shareFailure) await cmd.writeLn(`ems-link: ${instance.name} did not take the card's share: ${why}`);
+          shareFailure = why;
+        }
       }
       const commit = answers[i]?.build?.commit;
       if (!commit) continue;
@@ -77,7 +97,8 @@ emsLink.spec = {
   daemon: true,
   effect: 'write' as const,
   json: false,
-  description: "Watch every instance of the media service: log when one comes or goes, and run failed work again when one's build changes (the ems-link service)",
+  description:
+    "Watch every instance of the media service: log when one comes or goes, run failed work again when one's build changes, and keep the primary's card at the share CFG_EMS_CARD_SHARE_MB names (the ems-link service)",
   args: [],
   flags: [],
 };

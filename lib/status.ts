@@ -33,6 +33,7 @@ const familiesOf = (result: HealthResult): EmsFamily[] =>
       name,
       ...(family.model ? { model: family.model } : {}),
       ...(family.device ? { device: family.device } : {}),
+      ...(family.card_need_mb !== undefined ? { cardNeedMb: family.card_need_mb } : {}),
       ...(family.purpose ? { purpose: family.purpose } : {}),
       ...(family.ops ? { ops: family.ops } : {}),
       pinned: family.pinned ?? false,
@@ -76,6 +77,7 @@ export const statusFromHealth = (result: HealthResult, url: string, instance?: s
           ...(result.card.last_batch !== undefined ? { lastBatch: result.card.last_batch } : {}),
           ...(result.card.batch_in_flight !== undefined ? { batchInFlight: result.card.batch_in_flight } : {}),
           searchOnCard: result.card.search_on_card ?? [],
+          ...(result.card.share_mb !== undefined ? { shareMb: result.card.share_mb } : {}),
         },
       }
       : {}),

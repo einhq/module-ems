@@ -1,6 +1,6 @@
 /**
- * A stand-in EMS on loopback for the fast tier: answers each op from a table, records what it
- * was asked, and speaks the real envelope (`{ok, result, meta}` / `{ok:false, error}`), so a
+ * A stand-in EMS on loopback for the fast tier: answers each op from a table (`card` for `PUT
+ * /v0/card`), records what it was asked, and speaks the real envelope (`{ok, result, meta}` / `{ok:false, error}`), so a
  * caller's handling of both is what gets exercised — never a model. Its watches are kept as they
  * are put, a test tells their events (`tell`), and their clips are what a test puts in `clips`.
  *
@@ -183,7 +183,7 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
       });
     }
     const op = path.replace('/', '.');
-    const body = req.method === 'POST' ? unnamed(await req.json()) as Record<string, unknown> : {};
+    const body = req.method === 'POST' || req.method === 'PUT' ? unnamed(await req.json()) as Record<string, unknown> : {};
     requests.push({ op, body, authorization: req.headers.get('authorization') });
     await delay(op);
     const reply = options.ops?.[op];

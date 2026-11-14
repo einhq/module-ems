@@ -3,7 +3,7 @@
   "version": "0.14.5",
   "description": "Client for EMS (API v0), the media service that holds every model and media tool: transcription, embeddings, faces, voices, fingerprints, document text",
   "license": "MIT",
-  "coreApi": "^0.15.0",
+  "coreApi": "^0.15.4",
   "exports": {
     "./api": "./lib/api.ts",
     "./client": "./lib/client.ts",
@@ -73,7 +73,7 @@
         "type": "number",
         "default": "",
         "label": "Media service's share of the graphics card (MB)",
-        "description": "The most of the graphics card the media service's models hold, in MB; a model that needs more than is left runs on the processor instead, slower. 0 keeps every model on the processor. Leave room for a language model on the same card by lowering it. The media service's page sets it with the slider under the card.",
+        "description": "The most of the graphics card the media service's models hold, in MB; a model that needs more than is left runs on the processor instead, slower. 0 keeps every model on the processor. Leave room for a language model on the same card by lowering it. Settings → Media service sets it, and so does the slider under the card on the media service's status page.",
         "group": "Media service",
         "emptyMeans": "the media service's own share (EMS_CARD_SHARE_MB), by default the whole card",
         "restarts": [
@@ -176,7 +176,9 @@
     "routes": {
       "/system/flow": "ui/pages/flow.tsx",
       "/system/media-service": "ui/pages/media-service.tsx",
-      "/about/media-service": "ui/pages/about.tsx"
+      "/about/media-service": "ui/pages/about.tsx",
+      "/settings/media-service": "ui/pages/settings-media-service.tsx",
+      "/settings/transcription": "ui/pages/settings-transcription.tsx"
     }
   }
 }

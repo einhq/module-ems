@@ -20,6 +20,26 @@
       "label": "Media service",
       "icon": "cpu",
       "route": "/about/media-service"
+    },
+    {
+      "id": "ems.settings",
+      "slot": "settings.views",
+      "label": "Media service",
+      "description": "Where the media service answers, its key, and its share of the graphics card.",
+      "icon": "cpu",
+      "route": "/settings/media-service",
+      "admin": true,
+      "order": 40
+    },
+    {
+      "id": "ems.transcription",
+      "slot": "settings.views",
+      "label": "Transcription",
+      "description": "The language spoken in recordings, where a line of speech ends, and how a transcript is timed.",
+      "icon": "microphone",
+      "route": "/settings/transcription",
+      "admin": true,
+      "order": 45
     }
   ]
 }

@@ -880,7 +880,10 @@ export const findDefects = async (
 /**
  * How damaged a picture is (`image.damage`), each from 0 (none) to 1 (as much as a picture worth
  * restoring for it has): `faded` from the change `unfade` would make, `dusty` and `scratched` from
- * the specks and scratches `findDefects`'s detector marks. `measures` are what the scores come from.
+ * the specks and scratches `findDefects`'s detector marks, `blurred` (out of focus) and `shaken` (the
+ * camera moved) from the width of the picture's sharpest edges and how much wider they are one way
+ * than another. `measures` are what the scores come from; `edge` and `shake` are null for a picture
+ * with too few edges to tell.
  */
 type DamageResult = {
   width: number;
@@ -888,15 +891,27 @@ type DamageResult = {
   faded: number;
   dusty: number;
   scratched: number;
-  measures: { change: number; specks: number; scratches: number; length: number; marked: number };
+  blurred: number;
+  shaken: number;
+  measures: { change: number; specks: number; scratches: number; length: number; marked: number; edge: number | null; shake: number | null };
   producer: string;
 };
 
-/** How faded, dusty and scratched the picture at `path` is, as stored; it is only read. */
+/** How faded, dusty, scratched, blurred and shaken the picture at `path` is, as stored; it is only read. */
 export const findDamage = async (cmd: Command, path: string, call: RestoreCallOptions = {}): Promise<DamageResult> => {
   const answer = await request(cmd, 'image.damage', { file: fileRef(path) }, restoreCall(call));
   const raw = answer.result as Omit<DamageResult, 'producer'>;
-  return { width: raw.width, height: raw.height, faded: raw.faded, dusty: raw.dusty, scratched: raw.scratched, measures: raw.measures, producer: producerOf(answer) };
+  return {
+    width: raw.width,
+    height: raw.height,
+    faded: raw.faded,
+    dusty: raw.dusty,
+    scratched: raw.scratched,
+    blurred: raw.blurred,
+    shaken: raw.shaken,
+    measures: raw.measures,
+    producer: producerOf(answer),
+  };
 };
 
 /**
@@ -927,6 +942,21 @@ export const denoise = async (
   if (opts.noise) body.noise = opts.noise;
   if (opts.strength !== undefined) body.strength = opts.strength;
   return restored(await request(cmd, 'image.denoise', body, restoreCall(call)), opts.output);
+};
+
+/**
+ * A picture with its blur taken out (`image.deblur`): `focus` for a picture out of focus, `motion`
+ * for one blurred by a moving camera; `strength` blends with the picture.
+ */
+export const deblur = async (
+  cmd: Command,
+  path: string,
+  opts: RestoreOutput & { blur: 'focus' | 'motion'; strength?: number },
+  call: RestoreCallOptions = {},
+): Promise<RestoredPicture> => {
+  const body: Record<string, unknown> = { file: fileRef(path), blur: opts.blur, output: outputBody(opts) };
+  if (opts.strength !== undefined) body.strength = opts.strength;
+  return restored(await request(cmd, 'image.deblur', body, restoreCall(call)), opts.output);
 };
 
 /** One edit of a picture, as an XMP history event: `edited`, when (ISO 8601), by what and how. */

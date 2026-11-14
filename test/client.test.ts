@@ -389,7 +389,16 @@ Deno.test('health and the generations come from the system endpoints', async () 
 });
 
 Deno.test('how damaged a picture is comes back with its measures, and the damage generation with image.damage', async () => {
-  const result = { width: 400, height: 300, faded: 0.8, dusty: 0.1, scratched: 0, measures: { change: 18.8, specks: 30, scratches: 0, length: 0, marked: 0.002 } };
+  const result = {
+    width: 400,
+    height: 300,
+    faded: 0.8,
+    dusty: 0.1,
+    scratched: 0,
+    blurred: 0.7,
+    shaken: 0,
+    measures: { change: 18.8, specks: 30, scratches: 0, length: 0, marked: 0.002, edge: 1.62, shake: 1.1 },
+  };
   const stub = startStubEms({
     ops: { 'image.damage': { result, producer: 'damage/1+bopb-detection' } },
     capabilities: { models: { damage: 'damage/1+bopb-detection' } },

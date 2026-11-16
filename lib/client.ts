@@ -636,7 +636,8 @@ export const detectFaces = async (cmd: Command, path: string, angle = 0, mirror 
  * One request for the whole file, however long: EMS diarizes it in whatever windows its card
  * allows, embeds every turn from one decode of the sound, and stitches the windows back into
  * file-wide speakers before answering — the window is its hardware's business, not ours.
- * `speech` is false when nobody talks. `model` names both models, `<diarizer>+<embedder>`.
+ * `speech` is false when nobody talks. `model` is `voices/<n>+<diarizer>+<embedder>`: how EMS
+ * stitches the voices, and both models.
  */
 export const voiceprint = async (cmd: Command, path: string, opts: Pick<CallOptions, 'onProgress'> = {}): Promise<VoiceprintResult> => {
   const raw = await request(cmd, 'speech.voiceprint', { file: fileRef(path) }, opts);
@@ -1468,6 +1469,8 @@ type Generations = {
   ocr: string | null;
   /** The method and model `image.damage` reads damage with (`damageBy`). */
   damage: string | null;
+  /** How `speech.voiceprint` stitches voices and the models it runs, `voices/<n>+<diarizer>+<embedder>` (`voicesBy`). */
+  voiceprint: string | null;
   /** The text embedder `text.embed` runs (`embeddedBy` of a text vector). */
   textEmbed: string | null;
 };
@@ -1496,6 +1499,7 @@ export const generations = async (cmd: Command, waitSeconds?: number): Promise<G
     faces: ran('faces.detect', models.faces),
     ocr: ran('ocr.read', models.ocr),
     damage: ran('image.damage', models.damage),
+    voiceprint: ran('speech.voiceprint', models.voiceprint),
     textEmbed: named(models.text_embed),
   };
 };

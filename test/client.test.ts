@@ -381,6 +381,7 @@ Deno.test('health and the generations come from the system endpoints', async () 
       faces: null,
       ocr: null,
       damage: null,
+      voiceprint: null,
       textEmbed: null,
     });
   } finally {

@@ -118,6 +118,7 @@ const GENERATION_OF: Record<string, (capabilities: EmsCapabilities) => unknown> 
   'faces.embed': (c) => c.models?.faces,
   'ocr.read': (c) => c.models?.ocr,
   'image.damage': (c) => c.models?.damage,
+  'speech.voiceprint': (c) => c.models?.voiceprint,
 };
 
 /**

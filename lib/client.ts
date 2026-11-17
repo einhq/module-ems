@@ -11,7 +11,9 @@
  *
  * Watches (`putWatch`, `watchEvents`, …) are EMS's live streams read for their faces: they name no
  * file, only the stream, and their events come as they happen. A watch's clips are videos EMS cut of
- * its stream, fetched from EMS by id (`clipBody`) and then dropped there (`dropClip`).
+ * its stream, fetched from EMS by id (`clipBody`) and then dropped there (`dropClip`). Pages
+ * (`putPage`, `pageBody`, …) are EMS's renderings of a web page as live video, read by as many as
+ * read them, which name no file either.
  *
  * Three outcomes matter to everything downstream, and they are kept distinct: EMS unreachable
  * (`EmsUnavailableError` — the step fails for its normal retry path), EMS answered with a
@@ -20,7 +22,7 @@
  * There is no in-process fallback: the models are not in this image.
  */
 
-import type { Command } from '@ein/client';
+import type { Command, ServedFile } from '@ein/client';
 import type { EmsCapabilities, EmsDegradation } from '@ems/api';
 import { STEP_EXIT_INPUT, STEP_EXIT_TEMPORARY } from '@ein/client';
 import { forRequest } from './files.ts';
@@ -246,6 +248,9 @@ export class EmsError extends Error {
 
 /** EMS could not be reached, did not answer in time, or answered with nothing usable. */
 export class EmsUnavailableError extends Error {}
+
+/** EMS does as much as it may of what was asked (`busy`): a page past `EMS_PAGES`, say. */
+export class EmsBusyError extends EmsUnavailableError {}
 
 /** The caller stopped waiting: its own timeout, or the command was interrupted. Asking another instance would only wait again. */
 class EmsGaveUpError extends EmsUnavailableError {}
@@ -477,20 +482,24 @@ const requestOn = async (cmd: Command, instance: EmsInstance, op: string, body: 
   } finally {
     void files.release();
   }
-  if (!envelope.ok) {
-    const code = envelope.error?.code ?? `http_${response.status}`;
-    const message = envelope.error?.message ?? `HTTP ${response.status}`;
-    // A full queue, a worker still loading or a file endpoint EMS could not reach is, for a caller,
-    // the same as no EMS at all: the step fails now and the pool tries again later.
-    if (code === 'busy' || code === 'model_unavailable' || code === 'files_unavailable') throw new EmsUnavailableError(`${ems}: ${op} ${message} (${code})`);
-    // An EMS that predates EMS_OPS has no route for an op it lacks, and answers 404 without an envelope.
-    if (code === 'op_not_served' || code === 'http_404') throw new EmsNotServedError(`${ems}: ${op} ${message} (${code})`);
-    // What a second instance refuses within its own budget, the primary may not: only the
-    // primary's refusal is the source's (`generations`' `cpuBudget` is the primary's).
-    if (code === 'refused' && !instance.primary) throw new EmsUnavailableError(`${ems}: ${op} ${message} (${code})`);
-    throw new EmsError(op, code, message, envelope.error?.permanent === true, response.status);
-  }
+  if (!envelope.ok) throw failure(instance, op, envelope, response.status);
   return { result: envelope.result, meta: envelope.meta };
+};
+
+/** What an op's failure envelope is to its caller: one of the two error classes. */
+const failure = (instance: EmsInstance, op: string, envelope: Envelope, status: number): Error => {
+  const ems = who(instance);
+  const code = envelope.error?.code ?? `http_${status}`;
+  const message = envelope.error?.message ?? `HTTP ${status}`;
+  // A full queue, a worker still loading or a file endpoint EMS could not reach is, for a caller,
+  // the same as no EMS at all: the step fails now and the pool tries again later.
+  if (code === 'busy' || code === 'model_unavailable' || code === 'files_unavailable') return new EmsUnavailableError(`${ems}: ${op} ${message} (${code})`);
+  // An EMS that predates EMS_OPS has no route for an op it lacks, and answers 404 without an envelope.
+  if (code === 'op_not_served' || code === 'http_404') return new EmsNotServedError(`${ems}: ${op} ${message} (${code})`);
+  // What a second instance refuses within its own budget, the primary may not: only the
+  // primary's refusal is the source's (`generations`' `cpuBudget` is the primary's).
+  if (code === 'refused' && !instance.primary) return new EmsUnavailableError(`${ems}: ${op} ${message} (${code})`);
+  return new EmsError(op, code, message, envelope.error?.permanent === true, status);
 };
 
 /**
@@ -1149,6 +1158,92 @@ export const transcodeVideo = async (cmd: Command, path: string, opts: VideoTran
   };
 };
 
+type VideoStreamOptions = {
+  angle?: number;
+  mirror?: boolean;
+  /** Where in the video the stream begins, in seconds; the stream's own clock starts at 0 there, unless `sourceClock`. */
+  start?: number;
+  /** How many seconds of the video to stream; to its end when absent. */
+  duration?: number;
+  /** The stream's clock is the video's, starting at `start`: for the segments of one HLS playlist. */
+  sourceClock?: boolean;
+  /** Fragmented MP4 (the default) or MPEG-TS. */
+  format?: 'mp4' | 'mpegts';
+  /** A bounding box, 1920×1080 when absent; the picture is fitted inside and never upscaled. */
+  box?: { width?: number; height?: number };
+  /** The most frames a second; a faster source is thinned. */
+  fps?: number;
+  /** AAC bitrate, or `null` to drop the sound. Absent means EMS's default. */
+  audioBitrate?: string | null;
+  /** ffmpeg's name for the source's picture codec, as for `transcodeVideo`. */
+  sourceCodec?: string;
+};
+
+type VideoStream = {
+  /** The stream's bytes as EMS makes them; cancelling it stops EMS's encoder. */
+  body: ReadableStream<Uint8Array>;
+  /** `ffmpeg/<version>/<encoder>/<chain>` — which of EMS's encoders runs. */
+  producer: string;
+};
+
+/**
+ * A video as H.264 and AAC in fragmented MP4 or MPEG-TS, made by EMS while it is read
+ * (`video.stream`): for a player that cannot decode the AV1 renditions. EMS reads the file for as long as the stream runs,
+ * so the file stays granted until the body has been read to its end or cancelled. A failure to
+ * start is thrown as for any op; one after the first byte ends the body short.
+ */
+export const streamVideo = async (cmd: Command, path: string, opts: VideoStreamOptions = {}): Promise<VideoStream> => {
+  const op = 'video.stream';
+  const instance = await emsInstance(cmd);
+  const request: Record<string, unknown> = { file: fileRef(path, opts.angle ?? 0, opts.mirror ?? false) };
+  if (opts.box || opts.fps !== undefined) request.video = { ...(opts.box ? { box: opts.box } : {}), ...(opts.fps !== undefined ? { fps: opts.fps } : {}) };
+  if (opts.audioBitrate === null) request.audio = null;
+  else if (opts.audioBitrate) request.audio = { bitrate: opts.audioBitrate };
+  if (opts.start) request.start = opts.start;
+  if (opts.duration) request.duration = opts.duration;
+  if (opts.sourceClock) request.source_clock = true;
+  if (opts.format && opts.format !== 'mp4') request.format = opts.format;
+  if (opts.sourceCodec) request.hints = { source_codec: opts.sourceCodec };
+  const files = await forRequest(cmd, instance.url, request);
+  if (!files) throw new EmsUnavailableError(`${who(instance)}: ${op}: ${cmd.env.CFG_EMS_FILES_ADDRESS ? 'ems-files is not serving' : 'CFG_EMS_FILES_ADDRESS is empty'}`);
+  let response: Response;
+  try {
+    response = await fetchInterruptible(
+      cmd,
+      op,
+      `${instance.url}/${API_MAJOR}/video/stream`,
+      { method: 'POST', headers: { ...headers(instance), ...files.headers }, body: JSON.stringify(files.body) },
+      undefined,
+      0,
+    );
+    if (!response.ok || !response.body) {
+      const envelope = await response.json().catch(() => ({})) as Envelope;
+      throw failure(instance, op, envelope, response.status);
+    }
+  } catch (error) {
+    await files.release();
+    throw error;
+  }
+  const reader = response.body.getReader();
+  const body = new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      try {
+        const { value, done } = await reader.read();
+        if (!done) return controller.enqueue(value);
+        controller.close();
+      } catch (error) {
+        controller.error(error);
+      }
+      await files.release();
+    },
+    async cancel(reason) {
+      await reader.cancel(reason).catch(() => {});
+      await files.release();
+    },
+  });
+  return { body, producer: response.headers.get('ems-producer') ?? '' };
+};
+
 type StoryboardOptions = {
   /** VFS path of the node whose bytes EMS writes (the caller creates it first and syncs it after). */
   output: string;
@@ -1577,10 +1672,19 @@ export type WatchEvent =
 type WatchClip = { clip: string; start: string; end: string; duration: number; size: number; reasons: ('face' | 'motion' | 'request')[] };
 
 /**
- * One of `instance`'s routes that is not an op (`watches`, `card`), answered as an op's envelope is.
- * `what` names it in errors. It waits on nothing, so it may take `ROUTE_REQUEST_MS`.
+ * One of `instance`'s routes that is not an op (`watches`, `card`, `pages`), answered as an op's
+ * envelope is. `what` names it in errors. It waits on nothing, so it may take `timeoutMs`,
+ * `ROUTE_REQUEST_MS` unless said.
  */
-const routeRequest = async (cmd: Command, instance: EmsInstance, what: string, method: string, path: string, body?: unknown): Promise<unknown> => {
+const routeRequest = async (
+  cmd: Command,
+  instance: EmsInstance,
+  what: string,
+  method: string,
+  path: string,
+  body?: unknown,
+  timeoutMs = ROUTE_REQUEST_MS,
+): Promise<unknown> => {
   const ems = who(instance);
   let response: Response;
   try {
@@ -1588,7 +1692,7 @@ const routeRequest = async (cmd: Command, instance: EmsInstance, what: string, m
       method,
       headers: headers(instance),
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    }, ROUTE_REQUEST_MS);
+    }, timeoutMs);
   } catch (error) {
     if (error instanceof ConnectError) throw new EmsUnavailableError(`${ems}: ${what} unreachable: ${error.message}`);
     throw error;
@@ -1598,7 +1702,8 @@ const routeRequest = async (cmd: Command, instance: EmsInstance, what: string, m
   if (!envelope.ok) {
     const code = envelope.error?.code ?? `http_${response.status}`;
     const message = envelope.error?.message ?? `HTTP ${response.status}`;
-    if (code === 'busy' || code === 'model_unavailable') throw new EmsUnavailableError(`${ems}: ${what} ${message} (${code})`);
+    if (code === 'busy') throw new EmsBusyError(`${ems}: ${what} ${message} (${code})`);
+    if (code === 'model_unavailable') throw new EmsUnavailableError(`${ems}: ${what} ${message} (${code})`);
     throw new EmsError(what, code, message, envelope.error?.permanent === true, response.status);
   }
   return envelope.result;
@@ -1661,6 +1766,95 @@ export const clipBody = async (cmd: Command, id: string, clip: string): Promise<
 /** Drop the clip `clip` of the watch `id` from EMS. */
 export const dropClip = async (cmd: Command, id: string, clip: string): Promise<void> => {
   await watchRequest(cmd, 'DELETE', `watches/${encodeURIComponent(id)}/clips/${encodeURIComponent(clip)}`);
+};
+
+/** A page EMS renders into live video (EMS 4.25): the page as EMS reaches it, its picture, and how long it runs unread. */
+type PageSpec = {
+  url: string;
+  video?: { width?: number; height?: number; fps?: number; quality?: number };
+  /** Seconds without a reader after which EMS stops it. */
+  idle?: number;
+};
+
+/** A page EMS renders, as it says how it is doing. */
+export type PageStatus = {
+  id: string;
+  url: string;
+  state: 'starting' | 'running' | 'ended';
+  since: string;
+  video: { width: number; height: number; fps: number; quality: number };
+  idle: number;
+  encoder: string | null;
+  /** Readers of each form; `hls` is 1 while a file of the HLS form was asked for within 5 s. */
+  readers: { mp4: number; ts: number; hls: number };
+  bytes: number;
+  memory_mb?: number;
+  /** Why it ended. */
+  reason?: string;
+  made?: boolean;
+};
+
+/** A page's stream as a Cast player (`mp4`) or a DLNA screen (`ts`) reads it. */
+type PageFormat = 'mp4' | 'ts';
+
+// A page answers once its stream has its first keyframe, which EMS gives up on after 30 s.
+const PAGE_START_MS = 40_000;
+
+/** Start rendering the page `id` on `instance`, or leave it running when EMS has it with this spec already. */
+export const putPage = async (cmd: Command, instance: EmsInstance, id: string, spec: PageSpec): Promise<PageStatus> =>
+  await routeRequest(cmd, instance, 'pages', 'PUT', `pages/${encodeURIComponent(id)}`, spec, PAGE_START_MS) as PageStatus;
+
+/** Every page `instance` renders, and those that ended in the last minute. */
+export const listPages = async (cmd: Command, instance: EmsInstance): Promise<PageStatus[]> => await routeRequest(cmd, instance, 'pages', 'GET', 'pages') as PageStatus[];
+
+/** Stop rendering the page `id`; one EMS no longer has is stopped already. */
+export const deletePage = async (cmd: Command, instance: EmsInstance, id: string): Promise<void> => {
+  try {
+    await routeRequest(cmd, instance, 'pages', 'DELETE', `pages/${encodeURIComponent(id)}`);
+  } catch (error) {
+    if (!(error instanceof EmsError && error.code === 'not_found')) throw error;
+  }
+};
+
+/**
+ * One reader's stream of the page `id` in `format`, without end; cancelling it lets EMS's reader
+ * go. With `duration`, an MP4's header says it lasts that many seconds (EMS 0.4.6). Undefined once
+ * the page has ended, or EMS no longer has it.
+ */
+export const pageBody = async (instance: EmsInstance, id: string, format: PageFormat, duration?: number): Promise<ReadableStream<Uint8Array> | undefined> => {
+  let response: Response;
+  try {
+    const declared = format === 'mp4' && duration ? `?duration=${duration}` : '';
+    response = await fetch(`${instance.url}/${API_MAJOR}/pages/${encodeURIComponent(id)}/live.${format}${declared}`, { headers: headers(instance) });
+  } catch (error) {
+    throw new EmsUnavailableError(`${who(instance)}: page ${id} unreachable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (response.ok && response.body) return response.body;
+  const envelope = await response.json().catch(() => undefined) as Envelope | undefined;
+  const code = envelope?.error?.code ?? `http_${response.status}`;
+  if (code === 'not_found') return undefined;
+  const message = envelope?.error?.message ?? `HTTP ${response.status}`;
+  if (code === 'busy') throw new EmsUnavailableError(`${who(instance)}: page ${id} ${message} (${code})`);
+  throw new EmsError('pages', code, message, envelope?.error?.permanent === true, response.status);
+};
+
+/**
+ * The file `name` of page `id`'s HLS form (`index.m3u8`, `index<n>.ts`); undefined when EMS has no
+ * such file, or the page has ended. Throws when EMS cannot answer now, as when the playlist is not
+ * written yet, which the player is told to ask again.
+ */
+export const pageFile = async (instance: EmsInstance, id: string, name: string): Promise<ServedFile | undefined> => {
+  let response: Response;
+  try {
+    response = await fetch(`${instance.url}/${API_MAJOR}/pages/${encodeURIComponent(id)}/hls/${encodeURIComponent(name)}`, { headers: headers(instance) });
+  } catch (error) {
+    throw new EmsUnavailableError(`${who(instance)}: page ${id} unreachable: ${error instanceof Error ? error.message : String(error)}`);
+  }
+  if (response.ok) return { body: new Uint8Array(await response.arrayBuffer()), type: response.headers.get('content-type') ?? 'application/octet-stream' };
+  const envelope = await response.json().catch(() => undefined) as Envelope | undefined;
+  const code = envelope?.error?.code ?? `http_${response.status}`;
+  if (code === 'not_found') return undefined;
+  throw new EmsUnavailableError(`${who(instance)}: page ${id}: ${envelope?.error?.message ?? `HTTP ${response.status}`} (${code})`);
 };
 
 /**

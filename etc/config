@@ -3,3 +3,7 @@
 
 # Turn texts into vectors with EMS's text model, for whatever finds things by meaning.
 export CFG_TEXT_EMBEDDER='ems-text-embed'
+# Render a page as live video for a screen near the browser, which "Show on" hands its address to.
+# Five minutes without a reader leave time to pick the screen, and to leave the page a while on a
+# phone, whose Chrome pauses the screen meanwhile; a new start replaces one of the caller's nobody reads.
+export CFG_PAGE_STREAMER='page-stream start --idle=300'

@@ -5,6 +5,13 @@
 import type { HealthCheck } from '@ein/client';
 import type { EmsFamily, EmsModelSize, EmsStatus, EmsWorkerMemory } from '@ems/api';
 import type { HealthResult } from '@ems/client';
+import { parse, parseRange, satisfies } from '@std/semver';
+
+/**
+ * The versions of EMS's API this module speaks, as `services.ems` in mod.json names them, which is
+ * the image line an installation pulls.
+ */
+export const EMS_API_RANGE = '^0.4.6';
 
 /** Seconds as a compact age. */
 export const age = (seconds: number): string => {
@@ -124,10 +131,31 @@ export const statusFromHealth = (result: HealthResult, url: string, instance?: s
 };
 
 /**
+ * Why EMS's API `api` is not one this module speaks, or undefined when it is: a service older than
+ * the range is updated with the installation's services, a newer one waits for this module's update.
+ */
+export const apiCheck = (api: string): string | undefined => {
+  let version;
+  try {
+    version = parse(api);
+  } catch {
+    return `EMS reports API ${JSON.stringify(api)}, not a version; this module speaks ${EMS_API_RANGE}`;
+  }
+  const range = parseRange(EMS_API_RANGE);
+  if (satisfies(version, range)) return undefined;
+  const older = satisfies(version, parseRange(`<${EMS_API_RANGE.slice(1)}`));
+  return older
+    ? `EMS speaks API ${api}, older than the ${EMS_API_RANGE} this module needs: update the media service`
+    : `EMS speaks API ${api}, newer than the ${EMS_API_RANGE} this module knows: update the ems module`;
+};
+
+/**
  * What `health` asks about one instance of EMS (`ems-status --checks`, the `ems-link` service's
- * `checkCommand`): whether it answers and its model worker runs, each degradation, and the card.
+ * `checkCommand`): whether it answers, speaks an API this module knows, and its model worker runs,
+ * each degradation, and the card.
  * Nothing fails while EMS merely restarts or is busy — the steps that need it wait — except a card
- * the host is meant to have and does not see, which a person has to put back. Another instance's
+ * the host is meant to have and does not see, or an API this module does not speak, which a person
+ * has to put right. Another instance's
  * checks carry its name (`ems laptop`, `ems laptop worker`); the primary's carry none.
  */
 export const checksOf = (status: EmsStatus, other?: string): HealthCheck[] => {
@@ -138,6 +166,8 @@ export const checksOf = (status: EmsStatus, other?: string): HealthCheck[] => {
   }
   const build = status.build?.commit ? ` ${status.build.commit.slice(0, 7)}` : '';
   const checks: HealthCheck[] = [{ name: ems, state: 'ok', reason: `EMS${build} answering, up ${age(status.uptime)}` }];
+  const api = apiCheck(status.api);
+  if (api) checks.push({ name: `${ems} api`, state: 'fail', reason: api });
   if (!status.worker.running) checks.push({ name: `${ems} worker`, state: 'warn', reason: 'the model worker is down; EMS starts it again' });
   for (const d of status.degraded) {
     const since = d.since ? ` for ${age(Date.now() / 1000 - d.since)}` : '';

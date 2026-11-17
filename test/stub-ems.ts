@@ -2,7 +2,9 @@
  * A stand-in EMS on loopback for the fast tier: answers each op from a table (`card` for `PUT
  * /v0/card`), records what it was asked, and speaks the real envelope (`{ok, result, meta}` / `{ok:false, error}`), so a
  * caller's handling of both is what gets exercised — never a model. Its watches are kept as they
- * are put, a test tells their events (`tell`), and their clips are what a test puts in `clips`.
+ * are put, a test tells their events (`tell`), and their clips are what a test puts in `clips`. Its
+ * pages are kept as they are put, each format's live stream is `<format> of <id>`, and each HLS file
+ * `<name> of <id>`.
  *
  * It serves itself the files of its requests as `ems-files` serves EMS, in the same process: the
  * client sends names, and what the stub records and hands its handlers is the file each stands
@@ -11,10 +13,16 @@
 
 import { filesState, lookup } from '../lib/files.ts';
 import { FilesServer } from '../lib/files-server.ts';
+import { EMS_API_RANGE } from '../lib/status.ts';
+
+/** The API the stub reports: the lowest this module speaks. */
+const API = EMS_API_RANGE.slice(1);
 
 export type StubAnswer =
   | { result: unknown; producer?: string; meta?: Record<string, unknown> }
-  | { error: { code: string; message: string; permanent?: boolean }; status?: number };
+  | { error: { code: string; message: string; permanent?: boolean }; status?: number }
+  /** An op that answers bytes (`video.stream`): the chunks, sent one by one, as `video/mp4`. */
+  | { bytes: Uint8Array<ArrayBuffer>[]; producer?: string };
 
 export type StubReply = StubAnswer | ((body: Record<string, unknown>) => StubAnswer | Promise<StubAnswer>);
 
@@ -26,6 +34,12 @@ export type StubEms = {
   hungUp: string[];
   /** The watches put, by id, each with the spec it was given. */
   watches: Map<string, Record<string, unknown>>;
+  /** The pages put and not deleted, by id, each with the spec it was given. */
+  pages: Map<string, Record<string, unknown>>;
+  /** How many pages it renders at once (`EMS_PAGES`); past it a new one is `busy`. */
+  pageLimit: number;
+  /** The pages read now, which their status gives one `hls` reader. */
+  pagesRead: Set<string>;
   /** Each watch's clips, by `<watch>/<clip>`: what a test puts here is fetched, dropped and asked for. */
   clips: Map<string, Uint8Array<ArrayBuffer>>;
   /** Send an event to whoever follows the watch `id`'s events; answers how many do. */
@@ -46,7 +60,7 @@ export type StubOptions = {
   progressDelayMs?: number;
 };
 
-const envelope = (reply: StubAnswer): { status: number; body: Record<string, unknown> } => {
+const envelope = (reply: Exclude<StubAnswer, { bytes: unknown }>): { status: number; body: Record<string, unknown> } => {
   if ('error' in reply) {
     return { status: reply.status ?? 500, body: { ok: false, error: reply.error } };
   }
@@ -89,6 +103,8 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
   const requests: StubEms['requests'] = [];
   const hungUp: string[] = [];
   const watches = new Map<string, Record<string, unknown>>();
+  const pages = new Map<string, Record<string, unknown>>();
+  const pagesRead = new Set<string>();
   const clips = new Map<string, Uint8Array<ArrayBuffer>>();
   const followers = new Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>();
   const encoder = new TextEncoder();
@@ -146,10 +162,52 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
     }
     return Response.json({ ok: false, error: { code: 'invalid_request', message: `no route ${req.method} ${path}` } }, { status: 400 });
   };
+  const pageStatus = (id: string, spec: Record<string, unknown>) => ({
+    id,
+    url: String(spec.url ?? ''),
+    state: 'running',
+    since: new Date(0).toISOString(),
+    video: { width: 1920, height: 1080, fps: 30, quality: 23 },
+    idle: Number(spec.idle ?? 20),
+    encoder: 'h264_nvenc',
+    readers: { mp4: 0, ts: 0, hls: pagesRead.has(id) ? 1 : 0 },
+    bytes: 0,
+  });
+  const pageRoute = async (req: Request, path: string): Promise<Response> => {
+    const [, id, live, name] = path.split('/').map(decodeURIComponent);
+    if (!id && req.method === 'GET') return ok([...pages].map(([each, spec]) => pageStatus(each, spec)));
+    if (id && req.method === 'PUT') {
+      const spec = await req.json() as Record<string, unknown>;
+      requests.push({ op: 'pages.put', body: spec, authorization: req.headers.get('authorization') });
+      if (!pages.has(id) && pages.size >= stub.pageLimit) {
+        return Response.json({ ok: false, error: { code: 'busy', message: `this EMS streams at most ${stub.pageLimit} pages (EMS_PAGES)` } }, { status: 503 });
+      }
+      pages.set(id, spec);
+      return ok({ ...pageStatus(id, spec), made: true });
+    }
+    if (!id || !pages.has(id)) return Response.json({ ok: false, error: { code: 'not_found', message: `no page ${id}` } }, { status: 404 });
+    if (req.method === 'DELETE') {
+      pages.delete(id);
+      return ok(null);
+    }
+    const format = /^live\.(mp4|ts)$/.exec(live ?? '')?.[1];
+    if (format && req.method === 'GET') {
+      const declared = new URL(req.url).searchParams.get('duration');
+      const body = `${format} of ${id}${declared ? ` lasting ${declared} s` : ''}`;
+      return new Response(encoder.encode(body), { headers: { 'content-type': format === 'mp4' ? 'video/mp4' : 'video/mp2t' } });
+    }
+    if (live === 'hls' && name && req.method === 'GET') {
+      if (!/^index(\.m3u8|\d+\.ts)$/.test(name)) return Response.json({ ok: false, error: { code: 'not_found', message: `no ${name}` } }, { status: 404 });
+      const type = name.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t';
+      return new Response(encoder.encode(`${name} of ${id}`), { headers: { 'content-type': type } });
+    }
+    return Response.json({ ok: false, error: { code: 'invalid_request', message: `no route ${req.method} ${path}` } }, { status: 400 });
+  };
   const server = Deno.serve({ port: 0, hostname: '127.0.0.1', onListen: () => {} }, async (req) => {
     const url = new URL(req.url);
     const path = url.pathname.replace(/^\/v0\//, '');
     if (path === 'watches' || path.startsWith('watches/')) return await watchRoute(req, path);
+    if (path === 'pages' || path.startsWith('pages/')) return await pageRoute(req, path);
     // The signal also fires once an answer is sent, so only an abort during the delay is a hang-up.
     const delay = async (op: string) => {
       if (!options.delayMs) return;
@@ -169,11 +227,11 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
     if (req.method === 'GET') await delay(path);
     if (req.method === 'GET' && path === 'health') {
       if (options.health === null) return new Response('down', { status: 503 });
-      return Response.json({ ok: true, api: '3.0.0', uptime: 1, gpu: { present: false }, models: {}, worker: { running: true, restarts: 0 }, ...(options.health ?? {}) });
+      return Response.json({ ok: true, api: API, uptime: 1, gpu: { present: false }, models: {}, worker: { running: true, restarts: 0 }, ...(options.health ?? {}) });
     }
     if (req.method === 'GET' && path === 'capabilities') {
       return Response.json({
-        api: '3.0.0',
+        api: API,
         ops: Object.keys(options.ops ?? {}),
         tools: {},
         models: {},
@@ -191,6 +249,11 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
       return Response.json({ ok: false, error: { code: 'invalid_request', message: `unknown op: ${op}`, permanent: true } }, { status: 400 });
     }
     const resolved = typeof reply === 'function' ? await reply(body) : reply;
+    if ('bytes' in resolved) {
+      const chunks = [...resolved.bytes];
+      const stream = new ReadableStream<Uint8Array>({ pull: (controller) => chunks.length ? controller.enqueue(chunks.shift()!) : controller.close() });
+      return new Response(stream, { headers: { 'content-type': 'video/mp4', ...(resolved.producer ? { 'ems-producer': resolved.producer } : {}) } });
+    }
     const { status, body: answer } = envelope(resolved);
     if (req.headers.get('accept')?.includes('text/event-stream')) {
       const events = (options.progress?.[op] ?? []).map((event) => `event: progress\ndata: ${JSON.stringify(typeof event === 'string' ? { phase: event } : event)}\n\n`);
@@ -212,11 +275,14 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
   const addr = server.addr as Deno.NetAddr;
   const url = `http://127.0.0.1:${addr.port}`;
   filesState().endpoints.set(url, { address: 'stub-ems:0', emsUrl: url, secret: 'stub' });
-  return {
+  const stub: StubEms = {
     url,
     requests,
     hungUp,
     watches,
+    pages,
+    pageLimit: Infinity,
+    pagesRead,
     clips,
     tell: (id, event) => {
       const each = followers.get(id) ?? new Set();
@@ -229,6 +295,7 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
       return server.shutdown();
     },
   };
+  return stub;
 };
 
 /**

@@ -84,6 +84,9 @@ it wrote back before it answers. The header travels in the request, so its crede
 private as the request is: plain HTTP to an EMS on the compose network, HTTPS when `CFG_EMS_URL`
 is an `https://` address. EMS makes one mount per endpoint, on the first request that names a
 file, and every request after uses it; between requests it serves nothing, as no name is granted.
+`streamVideo` (`video.stream`) is the one op whose answer is bytes rather than an envelope: its
+name stays granted until the stream has been read to its end or cancelled, since EMS reads the
+video for as long as it streams.
 EMS mounts again when sshfs exits, or when the header names other credentials, which a restart of
 `ems-files` makes, letting go of the old mount at that address. A name stands for the node's file on disk, or for the node itself
 when it has none (the db tier), read and written through the VFS. A thread of its own listens,
@@ -182,3 +185,18 @@ reads its metadata from `media.probe` (phase 3a), and the transcodes are `video.
 `audio.transcode` (phase 3c, `@archive/media/transcode`), and a video's storyboard sheet is
 `video.storyboard` over its rendition (`@archive/media/storyboard`), and its cuts `video.shots`
 (`detect-chapters`): nothing in this image spawns a tool any more.
+
+**A page shown on a screen is rendered by EMS (`pages`, `page-stream`).** A Cast or DLNA screen
+plays video and nothing else, so a page of EiN (a dashboard wall, an album's slideshow) reaches it
+as live H.264 that EMS makes in a browser of its own. `startPageStream` (`@ems/page-stream`) asks
+core for a page ticket made from whoever asked (`pageSignIn`) and puts the page in EMS with the
+address of the ticket as EMS reaches EiN, `CFG_EMS_PAGE_ADDRESS` or the host of
+`CFG_EMS_FILES_ADDRESS` at EiN's HTTP port; EMS's browser opens it, which signs it in once,
+read-only, and opens the page. Core serves the stream at `/live/<id>.mp4` and `.ts` (`serveLive`),
+each reader's bytes fetched from EMS's `live.mp4` or `live.ts` of the page with EMS's key, which
+never leaves EiN. EMS stops the page when nobody has read it for its idle seconds, after which the
+path answers 404; `page-stream stop` stops it at once. The streams are kept in this process's
+memory, so a restart of EiN ends them, and EMS's own end them after their idle seconds. The
+module names `page-stream start` as core's `CFG_PAGE_STREAMER`, so "Show on" can hand a stream to a
+screen near the browser that EiN does not reach itself (core's `stream-page`, ein/core#1337): the
+screen reads it at the address EiN was reached at, over the internet.

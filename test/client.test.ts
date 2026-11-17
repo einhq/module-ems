@@ -34,12 +34,14 @@ import {
   putWatch,
   requestClip,
   stepExitCode,
+  streamVideo,
   transcodeVideo,
   transcribe,
   voiceprint,
   type WatchEvent,
   watchEvents,
 } from '../lib/client.ts';
+import { filesState } from '../lib/files.ts';
 import { startStubEms } from './stub-ems.ts';
 
 /**
@@ -500,6 +502,52 @@ Deno.test('a search the primary cannot answer goes to an instance that stamps it
     await primary.close();
     await same.close();
     await other.close();
+  }
+});
+
+Deno.test('a video stream passes on what EMS makes and keeps the file granted until it is read or cancelled', async () => {
+  const chunks = [new Uint8Array([1, 2]), new Uint8Array([3])];
+  const stub = startStubEms({ ops: { 'video.stream': { bytes: chunks, producer: 'ffmpeg/9.0.1/h264_nvenc/cuda' } } });
+  try {
+    const { cmd } = makeCmd({ CFG_EMS_URL: stub.url });
+    const before = filesState().names.size;
+    const stream = await streamVideo(cmd, '/tmp/clip.mov', { angle: 90, start: 12.5, audioBitrate: null, sourceCodec: 'hevc' });
+    assertEquals(stream.producer, 'ffmpeg/9.0.1/h264_nvenc/cuda');
+    assertEquals(stub.requests[0].body, { file: { path: '/tmp/clip.mov', angle: 90, mirror: false }, audio: null, start: 12.5, hints: { source_codec: 'hevc' } });
+    assertEquals(filesState().names.size, before + 1);
+    assertEquals(new Uint8Array(await new Response(stream.body).arrayBuffer()), new Uint8Array([1, 2, 3]));
+    assertEquals(filesState().names.size, before);
+
+    const cancelled = await streamVideo(cmd, '/tmp/clip.mov');
+    assertEquals(stub.requests[1].body, { file: { path: '/tmp/clip.mov', angle: 0, mirror: false } });
+    await cancelled.body.cancel();
+    assertEquals(filesState().names.size, before);
+
+    const segment = await streamVideo(cmd, '/tmp/clip.mov', { start: 8, duration: 4, sourceClock: true, format: 'mpegts' });
+    assertEquals(stub.requests[2].body, { file: { path: '/tmp/clip.mov', angle: 0, mirror: false }, start: 8, duration: 4, source_clock: true, format: 'mpegts' });
+    await segment.body.cancel();
+  } finally {
+    await stub.close();
+  }
+});
+
+Deno.test('a video stream EMS refuses or cannot start is thrown as for any op, and lets the file go', async () => {
+  const stub = startStubEms({
+    ops: {
+      'video.stream': (body) =>
+        (body.file as { angle: number }).angle
+          ? { error: { code: 'busy', message: 'at most 2 streams' }, status: 503 }
+          : { error: { code: 'refused', message: 'the file has no picture to stream', permanent: true }, status: 422 },
+    },
+  });
+  try {
+    const { cmd } = makeCmd({ CFG_EMS_URL: stub.url });
+    const before = filesState().names.size;
+    await assertRejects(() => streamVideo(cmd, '/tmp/song.m4a'), EmsError, 'no picture');
+    await assertRejects(() => streamVideo(cmd, '/tmp/clip.mov', { angle: 90 }), EmsUnavailableError, 'busy');
+    assertEquals(filesState().names.size, before);
+  } finally {
+    await stub.close();
   }
 });
 

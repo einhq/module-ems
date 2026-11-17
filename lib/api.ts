@@ -241,7 +241,8 @@ export type EmsCapabilities = {
   tools?: Record<string, string>;
   models?: { text_embed?: string; whisper?: string; faces?: string; image_embed?: string; ocr?: string; damage?: string; voiceprint?: string };
   limits?: { models?: number; tools?: number; encodes?: number; queue_depth?: number; interactive_reserve?: number };
-  encode?: { video_encoder?: string; cpu_budget?: string };
+  /** `page_renderer`: whether it has a browser to render pages with. */
+  encode?: { video_encoder?: string; cpu_budget?: string; page_renderer?: boolean };
   /**
    * `transcribe`: what a transcript decoded now is stamped with; `transcribe_places`: the same
    * settings in each place the instance can decode in, which its card's share decides.

@@ -7,3 +7,6 @@ export CFG_TEXT_EMBEDDER='ems-text-embed'
 # Five minutes without a reader leave time to pick the screen, and to leave the page a while on a
 # phone, whose Chrome pauses the screen meanwhile; a new start replaces one of the caller's nobody reads.
 export CFG_PAGE_STREAMER='page-stream start --idle=300'
+# Control such a page, which a screen's controls do: press keys in it (a slideshow's previous, pause
+# and next), ask what it shows, and hand it messages (move its video).
+export CFG_PAGE_CONTROL='page-stream'

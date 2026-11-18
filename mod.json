@@ -1,11 +1,11 @@
 {
   "name": "ems",
-  "version": "0.14.8",
+  "version": "0.14.9",
   "description": "Client for EMS (API v0), the media service that holds every model and media tool: transcription, embeddings, faces, voices, fingerprints, document text",
   "license": "MIT",
   "coreApi": "^0.15.13",
   "services": {
-    "ems": "^0.4.6"
+    "ems": "^0.4.8"
   },
   "exports": {
     "./api": "./lib/api.ts",

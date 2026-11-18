@@ -6,14 +6,16 @@
  * a browser hands a screen near it: `screen.mp4`, the MP4 whose header says it lasts a day, which
  * Chrome hands a Cast screen (it hands none an endless MP4, which it counts as long as it has read,
  * nor HLS on Android), and the live HLS `index.m3u8`, which Safari hands an AirPlay screen. The
- * stream stops when it is stopped, and on its own once nobody has read it for its idle seconds.
+ * stream carries the page's sound; keys pressed for it reach the page (`pressPageStream`), which
+ * says what it shows (`pageStreamState`) and takes messages (`tellPageStream`). It
+ * stops when it is stopped, and on its own once nobody has read it for its idle seconds.
  *
  * The media service reaches the page at `CFG_EMS_PAGE_ADDRESS`, or where it reaches EiN's files
  * (`CFG_EMS_FILES_ADDRESS`) at EiN's own HTTP port. The streams are kept in this process's memory.
  */
 
 import type { Access, Command, ModuleDevices } from '@ein/client';
-import { deletePage, EmsBusyError, emsInstance, EmsUnavailableError, listPages, pageBody, pageFile, putPage } from './client.ts';
+import { deletePage, EmsBusyError, emsInstance, EmsUnavailableError, listPages, pageBody, pageFile, pageMessage, pageState, pressPageKeys, putPage } from './client.ts';
 import type { EmsInstance } from './instances.ts';
 
 type PageStreamOptions = {
@@ -147,6 +149,26 @@ export const stopPageStream = async (cmd: Command, id: string): Promise<boolean>
   stream.end();
   await deletePage(cmd, stream.instance, id);
   return true;
+};
+
+/** Press `keys` in the page of the stream `id`, as someone at it would. False when there is none. */
+export const pressPageStream = async (cmd: Command, id: string, keys: string[]): Promise<boolean> => {
+  const stream = held().get(id);
+  if (!stream) return false;
+  await pressPageKeys(cmd, stream.instance, id, keys);
+  return true;
+};
+
+/** What the page of the stream `id` says it shows, or null; undefined when there is no such stream. */
+export const pageStreamState = async (cmd: Command, id: string): Promise<unknown> => {
+  const stream = held().get(id);
+  return stream ? await pageState(cmd, stream.instance, id) : undefined;
+};
+
+/** Hand the page of the stream `id` a message: whether it took it; undefined when there is no such stream. */
+export const tellPageStream = async (cmd: Command, id: string, message: Record<string, unknown>): Promise<boolean | undefined> => {
+  const stream = held().get(id);
+  return stream ? await pageMessage(cmd, stream.instance, id, message) : undefined;
 };
 
 /** Forget the streams the media service no longer renders, of those `rendering` (its page ids) leaves out. */

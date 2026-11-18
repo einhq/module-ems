@@ -1,8 +1,8 @@
 /**
  * `page-stream`, against a stand-in EMS: the page put with an address that signs the media
  * service's browser in once as the caller and opens the page, the stream served at its `/live/`
- * path in both forms and as HLS at another, listed for its owner, and gone from there once stopped or once EMS no longer
- * has it.
+ * path in both forms and as HLS at another, listed for its owner, keys pressed in its page for its owner alone, and gone
+ * from there once stopped or once EMS no longer has it.
  */
 
 import { assertEquals, assertMatch } from '@std/assert';
@@ -60,6 +60,20 @@ Deno.test({ name: 'page-stream', sanitizeResources: false, sanitizeOps: false },
       assertEquals(await playlist.text(), `index.m3u8 of ${stream.id}`);
       const segment = await fetch(`${baseUrl}${stream.hls.replace('index.m3u8', 'index3.ts')}`);
       assertEquals(await segment.text(), `index3.ts of ${stream.id}`);
+    });
+
+    await t.step("press, state and message reach the caller's page, and no other", async () => {
+      await client.execJson(`${at} page-stream press ${stream.id} ArrowRight Space`);
+      const pressed = ems.requests.filter((request) => request.op === 'pages.keys');
+      assertEquals(pressed.map((request) => request.body), [{ id: stream.id, keys: ['ArrowRight', 'Space'] }]);
+      await testCommands(client).shouldFailWith(`${at} page-stream press page-0000000000000000 ArrowRight`, 'no such page stream');
+      await testCommands(client).shouldFailWith(`${at} page-stream press ${stream.id}`, 'needs a stream');
+      assertEquals(await client.execJson(`${at} page-stream state ${stream.id}`), { title: `shown by ${stream.id}`, position: '1 of 2' });
+      assertEquals(await client.execJson(`${at} page-stream message ${stream.id} '{"seek":80}'`), { ok: true, taken: true });
+      const told = ems.requests.filter((request) => request.op === 'pages.message');
+      assertEquals(told.map((request) => request.body), [{ id: stream.id, message: { seek: 80 } }]);
+      await testCommands(client).shouldFailWith(`${at} page-stream message ${stream.id} 80`, 'JSON object');
+      await testCommands(client).shouldFailWith(`${at} page-stream state page-0000000000000000`, 'no such page stream');
     });
 
     await t.step('list shows it as EMS has it, and stop ends it there and here', async () => {

@@ -11,7 +11,7 @@ import { parse, parseRange, satisfies } from '@std/semver';
  * The versions of EMS's API this module speaks, as `services.ems` in mod.json names them, which is
  * the image line an installation pulls.
  */
-export const EMS_API_RANGE = '^0.4.6';
+export const EMS_API_RANGE = '^0.4.8';
 
 /** Seconds as a compact age. */
 export const age = (seconds: number): string => {

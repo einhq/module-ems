@@ -5,6 +5,9 @@
  *   page-stream start <route> [--width=N] [--height=N] [--fps=N] [--idle=S]
  *   page-stream list
  *   page-stream stop <id>
+ *   page-stream press <id> <key>...
+ *   page-stream state <id>
+ *   page-stream message <id> <json>
  *
  * `start` opens the page in the media service's browser as the caller sees it, read-only, and
  * answers where its stream is: `<path>.mp4` (fragmented MP4, for a Cast player), `<path>.ts`
@@ -13,13 +16,16 @@
  * which anyone with the path reads without signing in. It stops on
  * `stop`, and by itself once nobody has read it for its idle seconds (20 unless `--idle`). `list`
  * shows the caller's streams, an administrator's everyone's; `stop` takes the caller's own, or for an
- * administrator anyone's.
+ * administrator anyone's. `press` presses keys in the page, in turn, as someone at it would
+ * (`ArrowRight`, `Space`, a letter or a digit), `state` answers what the page says it shows, and
+ * `message` hands it a JSON object, such as `{"seek":80}`: a screen's controls stepping through a
+ * slideshow and moving in its video. Those take the caller's own stream, or an administrator's any.
  */
 import { type CmdReturn, collectUnknownFlags, type Command, isAdmin, parseArgs, reportUnknownFlags } from '@ein/client';
 import { emsInstance, listPages, type PageStatus } from '@ems/client';
-import { forgetEnded, type PageStream, pageStreams, startPageStream, stopPageStream } from '@ems/page-stream';
+import { forgetEnded, type PageStream, pageStreams, pageStreamState, pressPageStream, startPageStream, stopPageStream, tellPageStream } from '@ems/page-stream';
 
-const USAGE = 'usage: page-stream start <route> [--width=N] [--height=N] [--fps=N] [--idle=S] | list | stop <id>';
+const USAGE = 'usage: page-stream start <route> [--width=N] [--height=N] [--fps=N] [--idle=S] | list | stop <id> | press <id> <key>... | state <id> | message <id> <json>';
 
 type Listed = PageStream & { state?: PageStatus['state']; readers?: PageStatus['readers']; encoder?: string | null };
 
@@ -34,7 +40,7 @@ const pageStream = async (cmd: Command): CmdReturn => {
   const unknown: string[] = [];
   const flags = parseArgs(cmd.args, { string: ['width', 'height', 'fps', 'idle'], unknown: collectUnknownFlags(unknown) });
   if (await reportUnknownFlags(cmd, unknown)) return 1;
-  const [sub, arg] = flags._.map(String);
+  const [sub, arg, ...rest] = flags._.map(String);
   const fail = async (message: string) => {
     await cmd.writeError(`page-stream: ${message}\n`);
     return 1;
@@ -81,6 +87,36 @@ const pageStream = async (cmd: Command): CmdReturn => {
       return 0;
     }
 
+    if (sub === 'press' || sub === 'state' || sub === 'message') {
+      if (!arg || (sub === 'press' && !rest.length) || (sub === 'message' && rest.length !== 1)) {
+        return await fail(`${sub} needs a stream's id${sub === 'state' ? '' : sub === 'press' ? ' and the keys, such as ArrowRight' : ' and a JSON object'}\n${USAGE}`);
+      }
+      const stream = pageStreams().find((each) => each.id === arg);
+      if (!stream || (stream.uid !== cmd.access.uid && !isAdmin(cmd.access))) return await fail(`${arg}: no such page stream`);
+      if (sub === 'press') {
+        await pressPageStream(cmd, arg, rest);
+        if (cmd.json) await cmd.writeJSON({ ok: true });
+        return 0;
+      }
+      if (sub === 'state') {
+        const state = await pageStreamState(cmd, arg) ?? null;
+        if (cmd.json) await cmd.writeJSON(state);
+        else await cmd.writeLn(state === null ? 'the page says nothing of what it shows' : JSON.stringify(state));
+        return 0;
+      }
+      let message: unknown;
+      try {
+        message = JSON.parse(rest[0]);
+      } catch {
+        message = undefined;
+      }
+      if (!message || typeof message !== 'object' || Array.isArray(message)) return await fail(`message takes a JSON object, such as '{"seek":80}'`);
+      const taken = await tellPageStream(cmd, arg, message as Record<string, unknown>);
+      if (cmd.json) await cmd.writeJSON({ ok: true, taken: Boolean(taken) });
+      else if (!taken) await cmd.writeLn('the page did not take it');
+      return 0;
+    }
+
     return await fail(USAGE);
   } catch (error) {
     return await fail(error instanceof Error ? error.message : String(error));
@@ -92,8 +128,14 @@ pageStream.spec = {
   effect: 'read' as const,
   description: 'Stream a page of EiN as live video for a screen (a Cast or DLNA TV), rendered by the media service',
   args: [
-    { name: 'subcommand', type: 'string' as const, writes: ['start', 'stop'], description: 'start | list | stop' },
-    { name: 'target', type: 'string' as const, description: "start: the page's route, such as /dashboard-wall/Kitchen; stop: the stream's id" },
+    { name: 'subcommand', type: 'string' as const, writes: ['start', 'stop', 'press', 'message'], description: 'start | list | stop | press | state | message' },
+    { name: 'target', type: 'string' as const, description: "start: the page's route, such as /dashboard-wall/Kitchen; stop, press, state, message: the stream's id" },
+    {
+      name: 'what',
+      type: 'string' as const,
+      description:
+        'press: the keys to press, in turn: ArrowLeft, ArrowRight, ArrowUp, ArrowDown, Space, Enter, Escape, Tab, Backspace, Home, End, PageUp, PageDown, a letter or a digit; message: a JSON object, such as {"seek":80}',
+    },
   ],
   flags: [
     { name: 'width', type: 'string' as const, description: 'start: the picture and browser window width, 320 to 1920 (1920)' },
@@ -103,12 +145,15 @@ pageStream.spec = {
   ],
   examples: [
     'page-stream start /dashboard-wall/Kitchen',
-    "page-stream start '/media?q=sailboat&slideshow=screen' --idle=60",
+    "page-stream start '/slideshow?q=sailboat&slideshow=screen' --idle=60",
     'page-stream list',
     'page-stream stop page-3f2a9c41d07b5e18',
+    'page-stream press page-3f2a9c41d07b5e18 ArrowRight',
+    'page-stream state page-3f2a9c41d07b5e18',
+    `page-stream message page-3f2a9c41d07b5e18 '{"seek":80}'`,
   ],
   returns:
-    'start: id, path (read <path>.mp4 or <path>.ts), remote (the MP4 for a screen near a browser), hls (the live HLS playlist), route, uid and startedAt; list: those with state, readers and encoder; stop: ok.',
+    'start: id, path (read <path>.mp4 or <path>.ts), remote (the MP4 for a screen near a browser), hls (the live HLS playlist), route, uid and startedAt; list: those with state, readers and encoder; stop, press: ok; state: what the page says it shows, or null; message: ok and whether the page took it.',
 };
 
 export default pageStream;

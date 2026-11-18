@@ -8,7 +8,7 @@ needs (`coreApi`), the modules it depends on, and what it exports.
 
 ## What it holds
 
-Client for EMS, the media service holding every model and Python tool; `ems-status` and the `ems-link` dashboard row, which keeps the primary's card at the share `CFG_EMS_CARD_SHARE_MB` names; `ems-text-embed`, the text embedder `CFG_TEXT_EMBEDDER` names; `page-stream`, a page as live video for a screen, which `CFG_PAGE_STREAMER` names
+Client for EMS, the media service holding every model and Python tool; `ems-status` and the `ems-link` dashboard row, which keeps the primary's card at the share `CFG_EMS_CARD_SHARE_MB` names; `ems-text-embed`, the text embedder `CFG_TEXT_EMBEDDER` names; `page-stream`, a page as live video for a screen, which `CFG_PAGE_STREAMER` names, and controlled, which `CFG_PAGE_CONTROL` names
 
 ## Architecture
 

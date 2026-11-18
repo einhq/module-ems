@@ -1797,12 +1797,26 @@ export type PageStatus = {
 /** A page's stream as a Cast player (`mp4`) or a DLNA screen (`ts`) reads it. */
 type PageFormat = 'mp4' | 'ts';
 
-// A page answers once its stream has its first keyframe, which EMS gives up on after 30 s.
-const PAGE_START_MS = 40_000;
+// A page answers once its stream has its first keyframe, which EMS gives up on after 30 s, and the
+// page has painted, which it waits 15 s more for.
+const PAGE_START_MS = 55_000;
 
 /** Start rendering the page `id` on `instance`, or leave it running when EMS has it with this spec already. */
 export const putPage = async (cmd: Command, instance: EmsInstance, id: string, spec: PageSpec): Promise<PageStatus> =>
   await routeRequest(cmd, instance, 'pages', 'PUT', `pages/${encodeURIComponent(id)}`, spec, PAGE_START_MS) as PageStatus;
+
+/** Press the keys `keys` in the page `id` (`ArrowRight`, `Space`, a letter or a digit), in turn, as someone at it would (EMS 0.4.7). */
+export const pressPageKeys = async (cmd: Command, instance: EmsInstance, id: string, keys: string[]): Promise<void> => {
+  await routeRequest(cmd, instance, 'pages', 'POST', `pages/${encodeURIComponent(id)}/keys`, { keys });
+};
+
+/** What the page `id` says it shows (its `einScreen.state()`), or null when it says nothing (EMS 0.4.8). */
+export const pageState = async (cmd: Command, instance: EmsInstance, id: string): Promise<unknown> =>
+  await routeRequest(cmd, instance, 'pages', 'GET', `pages/${encodeURIComponent(id)}/state`);
+
+/** Hand the page `id` a message (its `einScreen.message()`): whether it took it (EMS 0.4.8). */
+export const pageMessage = async (cmd: Command, instance: EmsInstance, id: string, message: Record<string, unknown>): Promise<boolean> =>
+  (await routeRequest(cmd, instance, 'pages', 'POST', `pages/${encodeURIComponent(id)}/message`, { message }) as { taken: boolean }).taken;
 
 /** Every page `instance` renders, and those that ended in the last minute. */
 export const listPages = async (cmd: Command, instance: EmsInstance): Promise<PageStatus[]> => await routeRequest(cmd, instance, 'pages', 'GET', 'pages') as PageStatus[];

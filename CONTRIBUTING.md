@@ -39,6 +39,8 @@ to agree to a contributor licence agreement; core's CONTRIBUTING.md says what it
   Examples use invented people, never real ones.
 - **Tests**: add or change tests with the code. The README says how to run, test and check this
   repository; a module is developed and tested inside a checkout of EiN core.
+  A check on every push and pull request runs `deno fmt --check modules/ems` and
+  `deno lint modules/ems` in a checkout of core's `main`; run them there before you send a change.
 
 ## Security problems
 

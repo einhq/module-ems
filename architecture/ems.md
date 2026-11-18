@@ -188,7 +188,7 @@ reads its metadata from `media.probe` (phase 3a), and the transcodes are `video.
 
 **A page shown on a screen is rendered by EMS (`pages`, `page-stream`).** A Cast or DLNA screen
 plays video and nothing else, so a page of EiN (a dashboard wall, an album's slideshow) reaches it
-as live H.264 that EMS makes in a browser of its own. `startPageStream` (`@ems/page-stream`) asks
+as live H.264, with the page's sound as AAC, that EMS makes in a browser of its own. `startPageStream` (`@ems/page-stream`) asks
 core for a page ticket made from whoever asked (`pageSignIn`) and puts the page in EMS with the
 address of the ticket as EMS reaches EiN, `CFG_EMS_PAGE_ADDRESS` or the host of
 `CFG_EMS_FILES_ADDRESS` at EiN's HTTP port; EMS's browser opens it, which signs it in once,
@@ -199,4 +199,8 @@ path answers 404; `page-stream stop` stops it at once. The streams are kept in t
 memory, so a restart of EiN ends them, and EMS's own end them after their idle seconds. The
 module names `page-stream start` as core's `CFG_PAGE_STREAMER`, so "Show on" can hand a stream to a
 screen near the browser that EiN does not reach itself (core's `stream-page`, ein/core#1337): the
-screen reads it at the address EiN was reached at, over the internet.
+screen reads it at the address EiN was reached at, over the internet. `page-stream press`, `state` and
+`message` press keys in the page, ask what it says it shows and hand it a message through EMS, for
+the owner of the stream alone; the module names `page-stream` as core's `CFG_PAGE_CONTROL`, so the
+controls of a screen showing a slideshow step through it, say what it shows and move in its video
+(`stream-page --press|--state|--message`, ein/core#1428, #1429).

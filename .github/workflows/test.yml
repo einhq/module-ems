@@ -1,0 +1,31 @@
+# Formatting and lint under core's settings: the module is checked out where a core checkout has
+# it, in modules/ems, so core's deno.jsonc decides how it is formatted and linted, and core's Deno
+# action installs the Deno that core's own checks run (ein/core#1425). Neither resolves imports,
+# so the modules this one depends on are not needed.
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # Forgejo's job token reads its own repository only, and its core needs a sign-in, so there a
+      # read-only token in the organisation's secrets checks core out; on GitHub core is public.
+      - name: Check out core
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/core
+          token: ${{ secrets.CORE_TOKEN || github.token }}
+      - name: Check out the module
+        uses: actions/checkout@v4
+        with:
+          path: modules/ems
+      - name: Install Deno
+        uses: ./.github/actions/deno
+      - name: Format
+        run: deno fmt --check modules/ems
+      - name: Lint
+        run: deno lint modules/ems

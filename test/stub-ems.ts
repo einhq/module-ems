@@ -3,7 +3,7 @@
  * /v0/card`), records what it was asked, and speaks the real envelope (`{ok, result, meta}` / `{ok:false, error}`), so a
  * caller's handling of both is what gets exercised — never a model. Its watches are kept as they
  * are put, a test tells their events (`tell`), and their clips are what a test puts in `clips`. Its
- * pages are kept as they are put, each format's live stream is `<format> of <id>`, and each HLS file
+ * pages are kept as they are put, keys pressed in one are kept as a request, each format's live stream is `<format> of <id>`, and each HLS file
  * `<name> of <id>`.
  *
  * It serves itself the files of its requests as `ems-files` serves EMS, in the same process: the
@@ -189,6 +189,15 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
     if (req.method === 'DELETE') {
       pages.delete(id);
       return ok(null);
+    }
+    if (live === 'keys' && req.method === 'POST') {
+      requests.push({ op: 'pages.keys', body: { id, ...await req.json() }, authorization: req.headers.get('authorization') });
+      return ok(null);
+    }
+    if (live === 'state' && req.method === 'GET') return ok({ title: `shown by ${id}`, position: '1 of 2' });
+    if (live === 'message' && req.method === 'POST') {
+      requests.push({ op: 'pages.message', body: { id, ...await req.json() }, authorization: req.headers.get('authorization') });
+      return ok({ taken: true });
     }
     const format = /^live\.(mp4|ts)$/.exec(live ?? '')?.[1];
     if (format && req.method === 'GET') {

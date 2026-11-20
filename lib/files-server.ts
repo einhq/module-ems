@@ -19,6 +19,9 @@ import { type FromThread, type NodeCall, THREAD_URL, type ToThread } from './fil
 /** The most threads that serve connections; the media service mounts with as many connections. */
 const SESSION_THREADS = 4;
 
+/** The most one message of a followed stream carries. */
+const FOLLOW_CHUNK = 256 * 1024;
+
 type FilesServerOptions = {
   /** The port to listen on, 0 for any. */
   port: number;
@@ -138,6 +141,16 @@ class SessionThread {
       this.handles.set(id, await nodes.open(call.path, call.mode));
       return { value: id };
     }
+    if (call.call === 'follow') {
+      const id = this.nextHandle++;
+      const handle = await nodes.open(call.path, 'read').catch((error) => {
+        call.port.close();
+        throw error;
+      });
+      this.handles.set(id, handle);
+      void this.follow(handle, call.port);
+      return { value: id };
+    }
     if (call.call === 'stat') return { value: await nodes.stat(call.path) };
     const handle = this.handles.get(call.handle);
     if (!handle) throw new Error('ems-files: no such node handle');
@@ -158,6 +171,29 @@ class SessionThread {
         await handle.close();
         return { value: undefined };
     }
+  }
+
+  /**
+   * A stream node's bytes to a session thread as they come, each read one message, then `null` at
+   * the end; its close, the thread's, ends the read under way.
+   */
+  private async follow(handle: NodeHandle, port: MessagePort): Promise<void> {
+    try {
+      while (true) {
+        // A copy of the bytes read alone: the handle may answer with a view of a larger buffer.
+        const data = (await handle.read(FOLLOW_CHUNK)).slice();
+        if (data.length === 0) break;
+        port.postMessage(data, [data.buffer]);
+      }
+    } catch {
+      // Closed by the thread, or the stream failed: either way it ends here.
+    }
+    try {
+      port.postMessage(null);
+    } catch {
+      // The thread let go of it already.
+    }
+    port.close();
   }
 }
 

@@ -3,15 +3,16 @@
  * /v0/card`), records what it was asked, and speaks the real envelope (`{ok, result, meta}` / `{ok:false, error}`), so a
  * caller's handling of both is what gets exercised — never a model. Its watches are kept as they
  * are put, a test tells their events (`tell`), and their clips are what a test puts in `clips`. Its
- * pages are kept as they are put, keys pressed in one are kept as a request, each format's live stream is `<format> of <id>`, and each HLS file
- * `<name> of <id>`.
+ * pages are kept as they are put, with the stream node each of its outputs names, which a test
+ * writes into as the media service would, and keys pressed in one are kept as a request; its
+ * transcodes are kept with the nodes their names stand for.
  *
  * It serves itself the files of its requests as `ems-files` serves EMS, in the same process: the
  * client sends names, and what the stub records and hands its handlers is the file each stands
  * for, a disk path or the VFS path of a node with none.
  */
 
-import { filesState, lookup } from '../lib/files.ts';
+import { filesState, lookup, type Named } from '../lib/files.ts';
 import { FilesServer } from '../lib/files-server.ts';
 import { EMS_API_RANGE } from '../lib/status.ts';
 
@@ -38,8 +39,10 @@ export type StubEms = {
   pages: Map<string, Record<string, unknown>>;
   /** How many pages it renders at once (`EMS_PAGES`); past it a new one is `busy`. */
   pageLimit: number;
-  /** The pages read now, which their status gives one `hls` reader. */
-  pagesRead: Set<string>;
+  /** Each page's stream nodes, as its outputs' names stand for them: `{ mp4, ts }`. */
+  pageNodes: Map<string, Record<string, string>>;
+  /** The transcodes put and not deleted, by id, each with the nodes its names stand for: `{ source, output }`. */
+  transcodes: Map<string, Record<string, string>>;
   /** Each watch's clips, by `<watch>/<clip>`: what a test puts here is fetched, dropped and asked for. */
   clips: Map<string, Uint8Array<ArrayBuffer>>;
   /** Send an event to whoever follows the watch `id`'s events; answers how many do. */
@@ -104,7 +107,39 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
   const hungUp: string[] = [];
   const watches = new Map<string, Record<string, unknown>>();
   const pages = new Map<string, Record<string, unknown>>();
-  const pagesRead = new Set<string>();
+  const pageNodes = new Map<string, Record<string, string>>();
+  const transcodes = new Map<string, Record<string, string>>();
+  /** The node, or the file on disk, a granted name stands for. */
+  const standsFor = (name: string): string => {
+    const named = lookup(name);
+    return typeof named === 'object' ? named.node ?? named.disk ?? '' : '';
+  };
+  const transcodeRoute = async (req: Request, path: string): Promise<Response> => {
+    const [, id] = path.split('/').map(decodeURIComponent);
+    const status = (each: string, nodes: Record<string, string>) => ({
+      id: each,
+      source: nodes.source,
+      output: nodes.output,
+      state: 'running',
+      since: new Date(0).toISOString(),
+      video: { height: null, quality: 23 },
+      encoder: 'h264_nvenc',
+      bytes: 0,
+    });
+    if (!id && req.method === 'GET') return ok([...transcodes].map(([each, nodes]) => status(each, nodes)));
+    if (id && req.method === 'PUT') {
+      const spec = await req.json() as { source: { path: string }; output: { path: string } };
+      requests.push({ op: 'transcodes.put', body: spec, authorization: req.headers.get('authorization') });
+      transcodes.set(id, { source: standsFor(spec.source.path), output: standsFor(spec.output.path) });
+      return ok({ ...status(id, transcodes.get(id)!), made: true });
+    }
+    if (!id || !transcodes.has(id)) return Response.json({ ok: false, error: { code: 'not_found', message: `no transcode ${id}` } }, { status: 404 });
+    if (req.method === 'DELETE') {
+      transcodes.delete(id);
+      return ok(null);
+    }
+    return Response.json({ ok: false, error: { code: 'invalid_request', message: `no route ${req.method} ${path}` } }, { status: 400 });
+  };
   const clips = new Map<string, Uint8Array<ArrayBuffer>>();
   const followers = new Map<string, Set<ReadableStreamDefaultController<Uint8Array>>>();
   const encoder = new TextEncoder();
@@ -168,13 +203,11 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
     state: 'running',
     since: new Date(0).toISOString(),
     video: { width: 1920, height: 1080, fps: 30, quality: 23 },
-    idle: Number(spec.idle ?? 20),
     encoder: 'h264_nvenc',
-    readers: { mp4: 0, ts: 0, hls: pagesRead.has(id) ? 1 : 0 },
     bytes: 0,
   });
   const pageRoute = async (req: Request, path: string): Promise<Response> => {
-    const [, id, live, name] = path.split('/').map(decodeURIComponent);
+    const [, id, live] = path.split('/').map(decodeURIComponent);
     if (!id && req.method === 'GET') return ok([...pages].map(([each, spec]) => pageStatus(each, spec)));
     if (id && req.method === 'PUT') {
       const spec = await req.json() as Record<string, unknown>;
@@ -183,11 +216,14 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
         return Response.json({ ok: false, error: { code: 'busy', message: `this EMS streams at most ${stub.pageLimit} pages (EMS_PAGES)` } }, { status: 503 });
       }
       pages.set(id, spec);
+      const output = (spec.output ?? {}) as Record<string, { path: string }>;
+      pageNodes.set(id, Object.fromEntries(Object.entries(output).map(([format, { path }]) => [format, standsFor(path)])));
       return ok({ ...pageStatus(id, spec), made: true });
     }
     if (!id || !pages.has(id)) return Response.json({ ok: false, error: { code: 'not_found', message: `no page ${id}` } }, { status: 404 });
     if (req.method === 'DELETE') {
       pages.delete(id);
+      pageNodes.delete(id);
       return ok(null);
     }
     if (live === 'keys' && req.method === 'POST') {
@@ -199,17 +235,6 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
       requests.push({ op: 'pages.message', body: { id, ...await req.json() }, authorization: req.headers.get('authorization') });
       return ok({ taken: true });
     }
-    const format = /^live\.(mp4|ts)$/.exec(live ?? '')?.[1];
-    if (format && req.method === 'GET') {
-      const declared = new URL(req.url).searchParams.get('duration');
-      const body = `${format} of ${id}${declared ? ` lasting ${declared} s` : ''}`;
-      return new Response(encoder.encode(body), { headers: { 'content-type': format === 'mp4' ? 'video/mp4' : 'video/mp2t' } });
-    }
-    if (live === 'hls' && name && req.method === 'GET') {
-      if (!/^index(\.m3u8|\d+\.ts)$/.test(name)) return Response.json({ ok: false, error: { code: 'not_found', message: `no ${name}` } }, { status: 404 });
-      const type = name.endsWith('.m3u8') ? 'application/vnd.apple.mpegurl' : 'video/mp2t';
-      return new Response(encoder.encode(`${name} of ${id}`), { headers: { 'content-type': type } });
-    }
     return Response.json({ ok: false, error: { code: 'invalid_request', message: `no route ${req.method} ${path}` } }, { status: 400 });
   };
   const server = Deno.serve({ port: 0, hostname: '127.0.0.1', onListen: () => {} }, async (req) => {
@@ -217,6 +242,7 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
     const path = url.pathname.replace(/^\/v0\//, '');
     if (path === 'watches' || path.startsWith('watches/')) return await watchRoute(req, path);
     if (path === 'pages' || path.startsWith('pages/')) return await pageRoute(req, path);
+    if (path === 'transcodes' || path.startsWith('transcodes/')) return await transcodeRoute(req, path);
     // The signal also fires once an answer is sent, so only an abort during the delay is a hang-up.
     const delay = async (op: string) => {
       if (!options.delayMs) return;
@@ -291,7 +317,8 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
     watches,
     pages,
     pageLimit: Infinity,
-    pagesRead,
+    pageNodes,
+    transcodes,
     clips,
     tell: (id, event) => {
       const each = followers.get(id) ?? new Set();
@@ -313,6 +340,12 @@ export const startStubEms = (options: StubOptions = {}): StubEms => {
  * (`CFG_EMS_FILES_ADDRESS`, as EMS sees it) and listening on `port`. An endpoint already serving
  * `emsUrl` in this process — a booted system's own — is kept, and `stop` leaves it.
  */
+/** What a name `ems-files` granted stands for, as a test checks a request's or a watch's; undefined for none. */
+export const granted = (name: string): Named | undefined => {
+  const named = lookup(name);
+  return named === 'directory' ? undefined : named;
+};
+
 export const serveEmsFiles = async (emsUrl: string, address: string, port: number): Promise<{ stop: () => Promise<void> }> => {
   if (filesState().endpoints.has(emsUrl)) return { stop: () => Promise.resolve() };
   const noNodes = () => Promise.reject(new Error('no VFS here: only files on disk'));

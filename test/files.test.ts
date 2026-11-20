@@ -4,7 +4,8 @@
  * Fast tier: a real server on loopback over a temp directory, on its threads, plain and over TLS,
  * reached with ssh2's SFTP client the way EMS reaches it: the challenge answered with the secret
  * from the header, or TLS with the server's certificate pinned and the client's presented.
- * A node with no file on disk is played by an in-memory handle on the test's thread.
+ * A node with no file on disk is played by an in-memory handle on the test's thread, a stream node by
+ * one whose bytes the test sends as it goes.
  */
 
 import { createHmac } from 'node:crypto';
@@ -18,16 +19,54 @@ import { filesState, forRequest, grant, lookup } from '../lib/files.ts';
 
 const EMS_URL = 'http://ems.test:8181';
 
-/** The VFS as `grant` asks it: a node's disk path, none for a db-tier node, or no node at all. */
-const vfsOf = (physical: Record<string, string | undefined>) =>
+/** The VFS as `grant` asks it: a node's disk path, none for a db-tier node, or no node at all; `streams` are stream nodes. */
+const vfsOf = (physical: Record<string, string | undefined>, streams: string[] = []) =>
   ({
     access: {},
     sys: {
       vfs: {
-        stat: (_access: unknown, path: string) => path in physical ? Promise.resolve({ path: physical[path] }) : Promise.reject(new Error('not a node')),
+        get: (_access: unknown, path: string) =>
+          path in physical || streams.includes(path) ? Promise.resolve({ type: streams.includes(path) ? 'stream' : 'file' }) : Promise.reject(new Error('not a node')),
+        stat: (_access: unknown, path: string) =>
+          path in physical || streams.includes(path) ? Promise.resolve({ path: physical[path] }) : Promise.reject(new Error('not a node')),
       },
     },
   }) as never;
+
+/** A stream node as the VFS opens it to read: each read waits for what `send` gives, and ends with `end` or the handle's close. */
+const liveNode = () => {
+  const chunks: Uint8Array[] = [];
+  let wake: (() => void) | undefined;
+  const state = { opened: 0, closed: 0, ended: false };
+  const handle = () => {
+    state.opened++;
+    let closed = false;
+    return {
+      read: async () => {
+        while (chunks.length === 0 && !closed && !state.ended) await new Promise<void>((resolve) => wake = resolve);
+        return closed ? new Uint8Array(0) : chunks.shift() ?? new Uint8Array(0);
+      },
+      seek: () => Promise.resolve(0),
+      write: () => Promise.reject(new Error('read only')),
+      size: () => Promise.resolve(0),
+      close: () => {
+        closed = true;
+        state.closed++;
+        wake?.();
+        return Promise.resolve();
+      },
+    } as unknown as ResourceHandleIf;
+  };
+  const send = (text: string) => {
+    chunks.push(new TextEncoder().encode(text));
+    wake?.();
+  };
+  const end = () => {
+    state.ended = true;
+    wake?.();
+  };
+  return { handle, send, end, state };
+};
 
 /** A db-tier node's bytes, behind the part of a VFS handle the endpoint uses. */
 const memoryNode = (bytes: Uint8Array): ResourceHandleIf => {
@@ -99,6 +138,21 @@ Deno.test('forRequest: every file and output at any depth goes by its name', asy
     assertEquals(sent.headers['ems-files'], 'address=ein.test:2224; secret=5ec7e7');
     await sent.release();
     assertEquals(lookup(body.file.path), undefined);
+  } finally {
+    filesState().endpoints.delete(EMS_URL);
+  }
+});
+
+Deno.test('forRequest: outputs by name are each written, a stream node as a stream', async () => {
+  filesState().endpoints.set(EMS_URL, { address: 'ein.test:2224', emsUrl: EMS_URL, secret: '5ec7e7' });
+  try {
+    const cmd = vfsOf({}, ['/tmp/page-streams/p.mp4', '/tmp/page-streams/p.ts']);
+    const sent =
+      (await forRequest(cmd, EMS_URL, { url: 'http://ein.test/page', output: { mp4: { path: '/tmp/page-streams/p.mp4' }, ts: { path: '/tmp/page-streams/p.ts' } } }))!;
+    const { output } = sent.body as { output: Record<string, { path: string }> };
+    assert(output.mp4.path.endsWith('/0-p.mp4') && output.ts.path.endsWith('/1-p.ts'));
+    assertEquals(lookup(output.mp4.path), { mode: 'write', node: '/tmp/page-streams/p.mp4', stream: true });
+    await sent.release();
   } finally {
     filesState().endpoints.delete(EMS_URL);
   }
@@ -268,9 +322,21 @@ for (const overTls of [false, true]) {
       await Deno.writeTextFile(`${root}/other.jpg`, 'not granted');
       await Deno.writeTextFile(`${root}/small.avif`, 'an older and longer rendition');
       await Deno.symlink(`${root}/photo.jpg`, `${root}/linked`);
+      const live = liveNode();
+      // A stream node written: what comes, in order, and whether it was closed.
+      const written = { data: [] as string[], closed: false };
+      const writtenNode = {
+        seek: (offset: number) => offset === written.data.join('').length ? Promise.resolve(offset) : Promise.reject(new Deno.errors.PermissionDenied('in order')),
+        read: () => Promise.reject(new Error('written')),
+        write: (data: Uint8Array) => (written.data.push(new TextDecoder().decode(data)), Promise.resolve(data.length)),
+        size: () => Promise.resolve(written.data.join('').length),
+        close: () => (written.closed = true, Promise.resolve()),
+      } as unknown as ResourceHandleIf;
       const nodes = {
         open: (path: string) =>
-          path === '/docs/gone.txt' ? Promise.reject(new Deno.errors.NotFound('gone')) : Promise.resolve(memoryNode(new TextEncoder().encode('db-tier bytes'))),
+          path === '/docs/gone.txt' ? Promise.reject(new Deno.errors.NotFound('gone')) : Promise.resolve(
+            path === '/dev/porch/main.ts' ? live.handle() : path === '/tmp/page.ts' ? writtenNode : memoryNode(new TextEncoder().encode('db-tier bytes')),
+          ),
         stat: () => Promise.resolve({ size: 13, mtime: 0 }),
       };
 
@@ -379,6 +445,51 @@ for (const overTls of [false, true]) {
           } finally {
             await release();
             for (const other of others) other.end();
+          }
+        });
+
+        await t.step("a stream node's name is its bytes from when it was opened, read ahead and each read answered as they come", async () => {
+          const { names, release } = await grant(vfsOf({}, ['/dev/porch/main.ts']), [{ path: '/dev/porch/main.ts', mode: 'read' }]);
+          try {
+            const [stream] = names;
+            assert(Number((await sftp.stat(stream)).size) > 2 ** 40);
+            const handle = await sftp.open(stream, 'r');
+            assert(Number((await sftp.fstat(handle)).size) > 2 ** 40);
+            const read = async (position: number, length: number) => {
+              const buffer = new Uint8Array(length);
+              return new TextDecoder().decode(buffer.subarray(0, await sftp.read(handle, buffer, 0, length, position)));
+            };
+            const ahead = read(5, 5);
+            const first = read(0, 8);
+            live.send('hello');
+            assertEquals(await first, 'hello');
+            live.send('world');
+            assertEquals(await ahead, 'world');
+            assertEquals(await read(2, 6), 'llowor');
+            live.end();
+            assertEquals(await read(10, 4), '');
+            await sftp.close(handle);
+            assertEquals([live.state.opened, live.state.closed], [1, 1]);
+          } finally {
+            await release();
+          }
+        });
+
+        await t.step("a stream node's name granted to write is its writer, written in order", async () => {
+          const { names, release } = await grant(vfsOf({}, ['/tmp/page.ts']), [{ path: '/tmp/page.ts', mode: 'write' }]);
+          try {
+            const [stream] = names;
+            assertEquals(lookup(stream), { mode: 'write', node: '/tmp/page.ts', stream: true });
+            assert(Number((await sftp.stat(stream)).size) > 2 ** 40);
+            await assertRejects(() => sftp.open(stream, 'r'));
+            const handle = await sftp.open(stream, 'w');
+            await sftp.write(handle, new TextEncoder().encode('first '), 0, 6, 0);
+            await sftp.write(handle, new TextEncoder().encode('then'), 0, 4, 6);
+            await assertRejects(() => sftp.write(handle, new TextEncoder().encode('back'), 0, 4, 0));
+            await sftp.close(handle);
+            assertEquals([written.data.join(''), written.closed], ['first then', true]);
+          } finally {
+            await release();
           }
         });
 

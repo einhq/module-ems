@@ -1,0 +1,117 @@
+#!ts
+/**
+ * stream-transcode — a live stream transcoded by the media service into another, as H.264 and AAC,
+ * for a browser or a screen that cannot play it as it comes (a camera's HEVC).
+ *
+ *   stream-transcode start <source> [<output>] [--height=N] [--idle=S]
+ *   stream-transcode list
+ *   stream-transcode stop <id>
+ *
+ * `start` reads the stream node `source` and writes `output`, a stream node it makes where there
+ * is none, as the caller reads and writes them: fragmented MP4 into a `video/mp4` node (one named
+ * `.mp4` when it makes it), else MPEG-TS. Without `output` it writes fragmented MP4 into a node
+ * made for it, `/tmp/stream-transcodes/<id>.mp4`, the caller's alone and removed when it stops,
+ * which its answer names. A reader of the output joins it at its latest keyframe. It stops on
+ * `stop`, and by itself once nobody has read the output for its idle seconds (60 unless `--idle`),
+ * counted from its start. `list` shows the caller's transcodes, an
+ * administrator's everyone's; `stop` takes the caller's own, or for an administrator anyone's.
+ */
+import { type CmdReturn, collectUnknownFlags, type Command, isAdmin, parseArgs, reportUnknownFlags } from '@ein/client';
+import type { TranscodeStream } from '@ems/api';
+import { emsInstance, listTranscodes } from '@ems/client';
+import { forgetEndedTranscodes, startTranscode, stopTranscode, transcodeReaders, transcodes } from '@ems/transcode';
+
+const USAGE = 'usage: stream-transcode start <source> [<output>] [--height=N] [--idle=S] | list | stop <id>';
+
+const number = (value: unknown, flag: string): number | undefined => {
+  if (value === undefined) return undefined;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) throw new Error(`--${flag} takes a number, not '${value}'`);
+  return parsed;
+};
+
+const streamTranscode = async (cmd: Command): CmdReturn => {
+  const unknown: string[] = [];
+  const flags = parseArgs(cmd.args, { string: ['height', 'idle'], unknown: collectUnknownFlags(unknown) });
+  if (await reportUnknownFlags(cmd, unknown)) return 1;
+  const [sub, first, second] = flags._.map(String);
+  const fail = async (message: string) => {
+    await cmd.writeError(`stream-transcode: ${message}\n`);
+    return 1;
+  };
+
+  try {
+    if (sub === 'start') {
+      if (!first) return await fail(`start needs the stream read\n${USAGE}`);
+      const started = await startTranscode(cmd, first, second, { height: number(flags.height, 'height'), idle: number(flags.idle, 'idle') });
+      if (cmd.json) await cmd.writeJSON(started satisfies TranscodeStream);
+      else await cmd.writeLn(`${started.id}  ${started.source} -> ${started.output}`);
+      return 0;
+    }
+
+    if (sub === 'list') {
+      const running = await listTranscodes(cmd, await emsInstance(cmd)).catch(() => undefined);
+      if (running) await forgetEndedTranscodes(new Set(running.filter((each) => each.state !== 'ended').map((each) => each.id)));
+      const listed: TranscodeStream[] = [];
+      for (const transcode of transcodes().filter((each) => isAdmin(cmd.access) || each.uid === cmd.access.uid)) {
+        const status = running?.find((each) => each.id === transcode.id);
+        listed.push({
+          ...transcode,
+          readers: await transcodeReaders(transcode.id),
+          ...(status ? { state: status.state, bytes: status.bytes, ...(status.error ? { error: status.error } : {}) } : {}),
+        });
+      }
+      if (cmd.json) await cmd.writeJSON(listed satisfies TranscodeStream[]);
+      else {
+        for (const each of listed) {
+          await cmd.writeLn(`${each.id}  ${each.source} -> ${each.output}  ${each.state ?? 'unknown'}  readers ${each.readers}${each.error ? `  ${each.error}` : ''}`);
+        }
+      }
+      return 0;
+    }
+
+    if (sub === 'stop') {
+      if (!first) return await fail(`stop needs a transcode's id (stream-transcode list)\n${USAGE}`);
+      const transcode = transcodes().find((each) => each.id === first);
+      if (!transcode || (transcode.uid !== cmd.access.uid && !isAdmin(cmd.access))) return await fail(`${first}: no such transcode`);
+      await stopTranscode(first);
+      if (cmd.json) await cmd.writeJSON({ ok: true });
+      return 0;
+    }
+
+    return await fail(USAGE);
+  } catch (error) {
+    return await fail(error instanceof Error ? error.message : String(error));
+  }
+};
+
+streamTranscode.spec = {
+  name: 'stream-transcode',
+  effect: 'read' as const,
+  description: 'Transcode a live stream (a camera) into another as H.264, by the media service, for a browser or a screen that cannot play it as it comes',
+  args: [
+    { name: 'subcommand', type: 'string' as const, writes: ['start', 'stop'], description: 'start | list | stop' },
+    { name: 'target', type: 'string' as const, description: "start: the stream read, such as /dev/front-door/main.ts; stop: the transcode's id" },
+    {
+      name: 'output',
+      type: 'string' as const,
+      description:
+        'start: the stream written, made when it is not there, such as /dev/front-door/main.h264.ts; fragmented MP4 when it is video/mp4 (.mp4). Without it, one made for it under /tmp/stream-transcodes',
+    },
+  ],
+  flags: [
+    { name: 'height', type: 'string' as const, description: 'start: the picture at most this many pixels high, 144 to 2160 (as it comes)' },
+    { name: 'idle', type: 'string' as const, description: 'start: seconds without a reader of the output before it stops by itself (60)' },
+  ],
+  examples: [
+    'stream-transcode start /dev/front-door/main.ts /dev/front-door/main.h264.ts',
+    'stream-transcode start /dev/porch/sub.ts /tmp/porch.ts --height=720 --idle=120',
+    'stream-transcode start /dev/porch/main.ts --idle=15',
+    'stream-transcode list',
+    'stream-transcode stop transcode-3f2a9c41d07b5e18',
+  ],
+  returns:
+    'start: id, source, output (the one made for it, when none was named), uid and startedAt; list: those with state, readers (of the output), bytes and error; stop: ok.',
+};
+
+export default streamTranscode;

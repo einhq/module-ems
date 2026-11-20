@@ -1,16 +1,50 @@
 /**
  * `page-stream`, against a stand-in EMS: the page put with an address that signs the media
- * service's browser in once as the caller and opens the page, the stream served at its `/live/`
- * path in both forms and as HLS at another, listed for its owner, keys pressed in its page for its owner alone, and gone
- * from there once stopped or once EMS no longer has it.
+ * service's browser in once as the caller and opens the page, and two stream nodes of the caller's
+ * granted to the media service for writing, which a screen reads with a file ticket from the
+ * latest keyframe; the MP4 for a screen near a browser and the live HLS made from them; listed for
+ * its owner, keys pressed in its page for its owner alone, and gone, nodes and all, once stopped,
+ * once EMS no longer has it or once nobody has read it for its idle seconds.
  */
 
-import { assertEquals, assertMatch } from '@std/assert';
+import { assert, assertEquals, assertMatch, assertStringIncludes } from '@std/assert';
+import { ADMIN_ACCESS, isStreamWriter } from '@ein/client';
 import { createTestContext, testCommands } from '@ein/testing';
+import { markedWriter } from '../lib/live/marked.ts';
+import { TsSplitter } from '../lib/live/ts.ts';
 import { pageOrigin, type PageStream } from '@ems/page-stream';
 import { startStubEms } from './stub-ems.ts';
 
 const testCtx = createTestContext({ modules: ['ems'], boot: true });
+
+const MP4 = Deno.readFileSync(new URL('./data/page.mp4', import.meta.url));
+const TS = Deno.readFileSync(new URL('./data/page.mpegts', import.meta.url));
+
+/** The fixture's programme tables, a stream's header. */
+const TABLES = (() => {
+  const splitter = new TsSplitter();
+  splitter.feed(TS);
+  return splitter.header!;
+})();
+
+/** Where the fixture's second keyframe starts. */
+const secondKey = (): number => {
+  let at = 0;
+  let starts = 0;
+  for (const piece of new TsSplitter().feed(TS)) {
+    if (piece.kind === 'start' && ++starts === 2) return at;
+    at += piece.bytes.length;
+  }
+  throw new Error('the fixture has no second keyframe');
+};
+
+const settled = async (done: () => Promise<boolean>, what: string): Promise<void> => {
+  for (let tries = 0; tries < 300; tries++) {
+    if (await done()) return;
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+  throw new Error(`never: ${what}`);
+};
 
 Deno.test("the media service reaches pages at their own address, else at the files host on EiN's port", () => {
   assertEquals(pageOrigin({ CFG_EMS_PAGE_ADDRESS: 'ein.lan:8090', CFG_EMS_FILES_ADDRESS: 'core:2224' }), 'http://ein.lan:8090');
@@ -19,47 +53,102 @@ Deno.test("the media service reaches pages at their own address, else at the fil
 });
 
 Deno.test({ name: 'page-stream', sanitizeResources: false, sanitizeOps: false }, async (t) => {
-  await testCtx.setup();
+  const { vfs } = await testCtx.setup();
   const client = await testCtx.server.createShellClient();
   const ems = startStubEms();
   const at = `CFG_EMS_URL=${ems.url} CFG_EMS_FILES_ADDRESS=ein.test:2224 CFG_HTTP_PORT=8080`;
-  const { baseUrl } = testCtx.harness.instance!;
+  const { baseUrl, devices } = testCtx.harness.instance!;
+  /** The media service's writer of a page's stream node, as `ems-files` gives it one. */
+  const writerOf = async (path: string, mimetype: string) => {
+    const handle = await vfs.open(ADMIN_ACCESS, path, { mode: 'w' });
+    assert(isStreamWriter(handle));
+    return markedWriter(handle, mimetype);
+  };
+  const readers = async (path: string) => ((await vfs.stat(ADMIN_ACCESS, path)) as { readers?: number }).readers ?? 0;
 
   try {
     let stream: PageStream;
 
-    await t.step('start puts the page with an address that signs its browser in, and serves its stream', async () => {
-      stream = await client.execJson<PageStream>(`${at} page-stream start /dashboard-wall/Kitchen --fps=25 --idle=60`);
+    await t.step('start puts the page with an address that signs its browser in, and its stream nodes to write', async () => {
+      stream = await client.execJson<PageStream>(`${at} page-stream start /dashboard-wall/Kitchen --fps=25`);
       assertEquals(stream.route, '/dashboard-wall/Kitchen');
+      assertEquals(stream.path, `/tmp/page-streams/${stream.id}`);
       const put = ems.requests.find((request) => request.op === 'pages.put')!;
       assertEquals(put.body.video, { fps: 25 });
-      assertEquals(put.body.idle, 60);
+      assertEquals('idle' in put.body, false);
       const url = String(put.body.url);
       assertMatch(url, /^http:\/\/ein\.test:8080\/__page\/[0-9a-f]{64}$/);
+      // The media service is given names, which stand for the stream nodes.
+      const output = put.body.output as Record<string, { path: string }>;
+      assertMatch(output.mp4.path, /^\/[0-9a-f]{32}\/\d-page-[0-9a-f]{16}\.mp4$/);
+      assertEquals(ems.pageNodes.get(stream.id), { mp4: `${stream.path}.mp4`, ts: `${stream.path}.ts` });
+      const node = await vfs.get(ADMIN_ACCESS, `${stream.path}.ts`);
+      assertEquals([node.type, node.attrs.mimetype, node.props.mode & 0o777], ['stream', 'video/mp2t', 0o600]);
 
       const signIn = await fetch(`${baseUrl}${new URL(url).pathname}`, { redirect: 'manual' });
       await signIn.body?.cancel();
       assertEquals(signIn.status, 303);
       assertEquals(signIn.headers.get('location'), '/dashboard-wall/Kitchen');
+    });
 
-      const mp4 = await fetch(`${baseUrl}${stream.path}.mp4`);
-      assertEquals(mp4.headers.get('content-type'), 'video/mp4');
-      assertEquals(await mp4.text(), `mp4 of ${stream.id}`);
-      const ts = await fetch(`${baseUrl}${stream.path}.ts`);
-      assertEquals(await ts.text(), `ts of ${stream.id}`);
+    await t.step('a screen reads a node with a file ticket, from its latest keyframe', async () => {
+      const ts = await writerOf(`${stream.path}.ts`, 'video/mp2t');
+      const second = secondKey();
+      await ts.write(TS.subarray(0, second));
+      const { uid } = (await client.execJson<{ attrs: { uid: number } }>('stat /etc/users/admin')).attrs;
+      const ticket = await devices.fileTicket({ ...ADMIN_ACCESS, uid }, `${stream.path}.ts`);
+      const read = await fetch(`${baseUrl}/file${stream.path}.ts?ticket=${ticket}`);
+      assertEquals(read.headers.get('content-type'), 'video/mp2t');
+      const reader = read.body!.getReader();
+      const first = await reader.read();
+      // The tables first, then the keyframe it joined at.
+      assertEquals(first.value!.subarray(0, TABLES.length), TABLES);
+      await reader.cancel();
+      devices.dropFileTicket(ticket);
 
-      assertEquals(stream.remote, stream.hls.replace('index.m3u8', 'screen.mp4'));
+      // The live HLS waits for its first segment, from one keyframe to the next.
+      await settled(async () => (await readers(`${stream.path}.ts`)) === 0, 'the screen has let go');
+      const playlist = fetch(`${baseUrl}${stream.hls}`);
+      await settled(async () => (await readers(`${stream.path}.ts`)) > 0, 'the HLS reads the node');
+      await ts.write(TS.subarray(second));
+      const listed = await playlist;
+      assertEquals(listed.headers.get('content-type'), 'application/vnd.apple.mpegurl');
+      assertEquals(listed.headers.get('access-control-allow-origin'), '*');
+      const text = await listed.text();
+      assertStringIncludes(text, '#EXTINF:1.000,\nindex0.ts');
+      const segment = new Uint8Array(await (await fetch(`${baseUrl}${stream.hls.replace('index.m3u8', 'index0.ts')}`)).arrayBuffer());
+      assertEquals(segment.subarray(0, TABLES.length), TABLES);
+      const missing = await fetch(`${baseUrl}${stream.hls.replace('index.m3u8', 'index9.ts')}`);
+      await missing.body?.cancel();
+      assertEquals(missing.status, 404);
+      await ts.close();
+    });
+
+    await t.step('the MP4 for a screen near a browser says it lasts a day and holds a second at once', async () => {
+      const mp4 = await writerOf(`${stream.path}.mp4`, 'video/mp4');
+      await mp4.write(MP4);
+      assertMatch(stream.remote, /^\/live\/[0-9a-f]{64}\/screen\.mp4$/);
       const remote = await fetch(`${baseUrl}${stream.remote}`);
       assertEquals(remote.headers.get('content-type'), 'video/mp4');
-      assertEquals(await remote.text(), `mp4 of ${stream.id} lasting 86400 s`);
-
-      assertMatch(stream.hls, /^\/live\/[0-9a-f]{64}\/index\.m3u8$/);
-      const playlist = await fetch(`${baseUrl}${stream.hls}`);
-      assertEquals(playlist.headers.get('content-type'), 'application/vnd.apple.mpegurl');
-      assertEquals(playlist.headers.get('access-control-allow-origin'), '*');
-      assertEquals(await playlist.text(), `index.m3u8 of ${stream.id}`);
-      const segment = await fetch(`${baseUrl}${stream.hls.replace('index.m3u8', 'index3.ts')}`);
-      assertEquals(await segment.text(), `index3.ts of ${stream.id}`);
+      const reader = remote.body!.getReader();
+      let held = new Uint8Array(0);
+      /** Where the start ends: past its `free` box, which fills it out to Chrome's next read. */
+      const startEnds = (): number | undefined => {
+        const view = new DataView(held.buffer);
+        for (let at = 0; at + 8 <= held.length; at += view.getUint32(at)) {
+          if (new TextDecoder().decode(held.subarray(at + 4, at + 8)) === 'free') return at + view.getUint32(at);
+        }
+        return undefined;
+      };
+      while (startEnds() === undefined) {
+        const { value } = await reader.read();
+        held = new Uint8Array([...held, ...value!]);
+      }
+      await reader.cancel();
+      assertEquals(new TextDecoder().decode(held.subarray(4, 8)), 'ftyp');
+      assertStringIncludes(new TextDecoder('latin1').decode(held), 'mehd');
+      assertEquals(startEnds()! % (32 * 1024), 0);
+      await mp4.close();
     });
 
     await t.step("press, state and message reach the caller's page, and no other", async () => {
@@ -77,14 +166,13 @@ Deno.test({ name: 'page-stream', sanitizeResources: false, sanitizeOps: false },
     });
 
     await t.step('list shows it as EMS has it, and stop ends it there and here', async () => {
-      const listed = await client.execJson<(PageStream & { state?: string })[]>(`${at} page-stream list`);
-      assertEquals(listed.map((each) => [each.id, each.state]), [[stream.id, 'running']]);
+      const listed = await client.execJson<(PageStream & { state?: string; readers: number })[]>(`${at} page-stream list`);
+      // Nobody reads its nodes, whose writers have closed.
+      assertEquals(listed.map((each) => [each.id, each.state, each.readers]), [[stream.id, 'running', 0]]);
 
       await client.execJson(`${at} page-stream stop ${stream.id}`);
       assertEquals(ems.pages.size, 0);
-      const gone = await fetch(`${baseUrl}${stream.path}.mp4`);
-      await gone.body?.cancel();
-      assertEquals(gone.status, 404);
+      assertEquals(await vfs.exists(ADMIN_ACCESS, `${stream.path}.mp4`), false);
       const goneHls = await fetch(`${baseUrl}${stream.hls}`);
       await goneHls.body?.cancel();
       assertEquals(goneHls.status, 404);
@@ -94,27 +182,35 @@ Deno.test({ name: 'page-stream', sanitizeResources: false, sanitizeOps: false },
     await t.step('a page EMS no longer has is no longer served or listed', async () => {
       const second = await client.execJson<PageStream>(`${at} page-stream start /albums/Summer?slideshow=screen`);
       ems.pages.delete(second.id);
-      const ended = await fetch(`${baseUrl}${second.path}.ts`);
+      assertEquals(await client.execJson(`${at} page-stream list`), []);
+      assertEquals(await vfs.exists(ADMIN_ACCESS, `${second.path}.ts`), false);
+      const ended = await fetch(`${baseUrl}${second.remote}`);
       await ended.body?.cancel();
       assertEquals(ended.status, 404);
-      assertEquals(await client.execJson(`${at} page-stream list`), []);
     });
 
     await t.step("when EMS is full, the caller's streams nobody reads make room, and others' never", async () => {
       ems.pageLimit = 2;
       const read = await client.execJson<PageStream>(`${at} page-stream start /dashboard-wall/Kitchen`);
       const left = await client.execJson<PageStream>(`${at} page-stream start /dashboard-wall/Hall`);
-      ems.pagesRead.add(read.id);
+      const reading = await vfs.open(ADMIN_ACCESS, `${read.path}.ts`, { mode: 'r' });
       const replacing = await client.execJson<PageStream>(`${at} page-stream start /dashboard-wall/Porch`);
       assertEquals([...ems.pages.keys()].sort(), [read.id, replacing.id].sort());
       const gone = await fetch(`${baseUrl}${left.hls}`);
       await gone.body?.cancel();
       assertEquals(gone.status, 404);
 
-      ems.pagesRead.add(replacing.id);
+      const alsoReading = await vfs.open(ADMIN_ACCESS, `${replacing.path}.mp4`, { mode: 'r' });
       await testCommands(client).shouldFailWith(`${at} page-stream start /dashboard-wall/Attic`, 'someone watches each');
+      await reading.close();
+      await alsoReading.close();
       for (const id of [read.id, replacing.id]) await client.execJson(`${at} page-stream stop ${id}`);
       ems.pageLimit = Infinity;
+    });
+
+    await t.step('a page nobody reads for its idle seconds stops, nodes and all', async () => {
+      const idle = await client.execJson<PageStream>(`${at} page-stream start /dashboard-wall/Kitchen --idle=1`);
+      await settled(async () => !ems.pages.has(idle.id) && !(await vfs.exists(ADMIN_ACCESS, `${idle.path}.mp4`)), 'the idle page stops');
     });
 
     await t.step('a page is a path of this EiN', async () => {

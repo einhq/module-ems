@@ -86,7 +86,21 @@ is an `https://` address. EMS makes one mount per endpoint, on the first request
 file, and every request after uses it; between requests it serves nothing, as no name is granted.
 `streamVideo` (`video.stream`) is the one op whose answer is bytes rather than an envelope: its
 name stays granted until the stream has been read to its end or cancelled, since EMS reads the
-video for as long as it streams.
+video for as long as it streams. A watch (`putWatch`, EMS 4.24) names stream nodes, a camera's
+`/dev/<camera>/sub.ts`: they are granted for as long as the watch runs, the same names each time
+it is stated with the same spec to the same endpoint (`forRunning`), so EMS leaves it running; another
+spec, or `ems-files` started anew, grants new names and ends the old once EMS has been told. A page
+(`putPage`) and a transcode (`putTranscode`) are granted the same way for as long as they run.
+A stream node's name is its bytes from the moment EMS opens it: the session thread follows the node
+once, its bytes sent from EiN's thread as they come, and answers each of sshfs's reads, several at
+once and a little ahead, from a window of the last 8 MiB (`files-stream.ts`), short when only some
+has come, as the end when its bytes are gone or nothing came for 20 s; it says a size that never
+ends, and EMS reads it with `O_DIRECT`, so the kernel's cache takes no short read for its end.
+A stream node granted to write (an `output`) is its writer, written in order from its start, each
+write a call on EiN's thread; there `ems-files` cuts what comes by the node's media type and marks
+the stream's header and the points a reader may start at (`@ems/live/marked`): fragmented MP4's
+`ftyp` and `moov` and each fragment that starts at a keyframe, MPEG-TS's first PAT and PMT and each
+packet of the picture that marks a keyframe. A reader of the node then joins at its latest keyframe.
 EMS mounts again when sshfs exits, or when the header names other credentials, which a restart of
 `ems-files` makes, letting go of the old mount at that address. A name stands for the node's file on disk, or for the node itself
 when it has none (the db tier), read and written through the VFS. A thread of its own listens,
@@ -188,15 +202,21 @@ reads its metadata from `media.probe` (phase 3a), and the transcodes are `video.
 
 **A page shown on a screen is rendered by EMS (`pages`, `page-stream`).** A Cast or DLNA screen
 plays video and nothing else, so a page of EiN (a dashboard wall, an album's slideshow) reaches it
-as live H.264, with the page's sound as AAC, that EMS makes in a browser of its own. `startPageStream` (`@ems/page-stream`) asks
-core for a page ticket made from whoever asked (`pageSignIn`) and puts the page in EMS with the
-address of the ticket as EMS reaches EiN, `CFG_EMS_PAGE_ADDRESS` or the host of
-`CFG_EMS_FILES_ADDRESS` at EiN's HTTP port; EMS's browser opens it, which signs it in once,
-read-only, and opens the page. Core serves the stream at `/live/<id>.mp4` and `.ts` (`serveLive`),
-each reader's bytes fetched from EMS's `live.mp4` or `live.ts` of the page with EMS's key, which
-never leaves EiN. EMS stops the page when nobody has read it for its idle seconds, after which the
-path answers 404; `page-stream stop` stops it at once. The streams are kept in this process's
-memory, so a restart of EiN ends them, and EMS's own end them after their idle seconds. The
+as live H.264, with the page's sound as AAC, that EMS makes in a browser of its own. `startPageStream` (`@ems/page-stream`) makes
+two stream nodes, `/tmp/page-streams/<id>.mp4` and `.ts`, whoever asked's alone, asks core for a
+page ticket made from whoever asked (`pageSignIn`) and puts the page in EMS with the address of the ticket as
+EMS reaches EiN, `CFG_EMS_PAGE_ADDRESS` or the host of `CFG_EMS_FILES_ADDRESS` at EiN's HTTP port,
+and the two nodes granted to write for as long as the page runs; EMS's browser opens the page,
+which signs it in once, read-only, and EMS writes its encode into the nodes. A Cast or DLNA screen
+reads a node with a file ticket, joining at its latest keyframe. For a screen near a browser the
+module serves, at an unguessable `/live/<id>/` (`serveFiles`), what it makes of the nodes as one of
+their readers: `screen.mp4`, the MP4 with its clock at 0, its header saying it lasts a day and a
+second of it at once (`@ems/live/screen`, ein/core#1420), and the live HLS (`@ems/live/hls`), cut
+from the TS at its keyframes while a player asks for it. EMS counts no readers: the module stops a
+page once its nodes have had no reader for its idle seconds, and `page-stream stop` stops it at
+once; either deletes the page in EMS, ends its names and removes its nodes, which ends their
+readers. The streams are kept in this process's memory, so a restart of EiN ends them, and EMS's
+own with them when it can no longer write. The
 module names `page-stream start` as core's `CFG_PAGE_STREAMER`, so "Show on" can hand a stream to a
 screen near the browser that EiN does not reach itself (core's `stream-page`, ein/core#1337): the
 screen reads it at the address EiN was reached at, over the internet. `page-stream press`, `state` and
@@ -204,3 +224,14 @@ screen reads it at the address EiN was reached at, over the internet. `page-stre
 the owner of the stream alone; the module names `page-stream` as core's `CFG_PAGE_CONTROL`, so the
 controls of a screen showing a slideshow step through it, say what it shows and move in its video
 (`stream-page --press|--state|--message`, ein/core#1428, #1429).
+
+**A live stream EMS transcodes (`transcodes`, `stream-transcode`).** A camera whose codec a browser
+or a screen cannot play (HEVC) is read by EMS and written as H.264 and AAC into another stream node,
+fragmented MP4 into a `video/mp4` one and MPEG-TS into any other, which a reader joins at its latest
+keyframe as any. `startTranscode` (`@ems/transcode`) takes the stream read and the one written,
+makes the latter as the caller's when it is not there, or one for it under `/tmp/stream-transcodes`
+(the caller's alone, removed when it stops) when none is named, and grants EMS both, as the caller
+reads and writes them, for as long as it runs. The cuts a writer marks a stream's header and start
+points by (`@ems/live/split`) are the devices module's too, for the camera nodes it writes.
+The caller starts it (`stream-transcode start`); the module stops it once its output has had no
+reader for its idle seconds, counted from its start. A transcode is kept in this process's memory.

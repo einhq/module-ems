@@ -1,7 +1,8 @@
-# Formatting and lint under core's settings: the module is checked out where a core checkout has
-# it, in modules/ems, so core's deno.jsonc decides how it is formatted and linted, and core's Deno
-# action installs the Deno that core's own checks run (ein/core#1425). Neither resolves imports,
-# so the modules this one depends on are not needed.
+# The module's own checks under core's settings: it is checked out where a core checkout has it, in
+# modules/ems, so core's deno.jsonc decides how it is formatted, linted and type-checked, and core's
+# Deno action installs the Deno that core's own checks run (ein/core#1425). Its files import the
+# modules it depends on, so those are cloned beside it at their main; only its own fast tests run
+# (ein/core#1427).
 name: test
 
 on:
@@ -11,14 +12,16 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    env:
+      # Forgejo's job token reads its own repository only, and its core and modules need a sign-in,
+      # so there a read-only token in the organisation's secrets reads them; on GitHub they are public.
+      TOKEN: ${{ secrets.CORE_TOKEN || github.token }}
     steps:
-      # Forgejo's job token reads its own repository only, and its core needs a sign-in, so there a
-      # read-only token in the organisation's secrets checks core out; on GitHub core is public.
       - name: Check out core
         uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/core
-          token: ${{ secrets.CORE_TOKEN || github.token }}
+          token: ${{ env.TOKEN }}
       - name: Check out the module
         uses: actions/checkout@v4
         with:
@@ -29,3 +32,9 @@ jobs:
         run: deno fmt --check modules/ems
       - name: Lint
         run: deno lint modules/ems
+      - name: Check out its dependencies
+        run: deno run -A scripts/module-deps.ts modules/ems
+      - name: Type-check
+        run: deno run -A scripts/check-module.ts modules/ems
+      - name: Test
+        run: deno test --allow-all --parallel modules/ems

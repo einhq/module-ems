@@ -274,3 +274,20 @@ export type EmsInstanceRow = {
   /** For a second instance: the ops it serves that it stamps otherwise than the primary, which it is not given. */
   differs?: string[];
 };
+
+/**
+ * A live stream the media service transcodes into another (`stream-transcode start`): its id, the
+ * stream read and the one written, as VFS paths, whose it is, and since when; with `list`, how EMS
+ * says it is doing, how many read its output, and how much it has written.
+ */
+export type TranscodeStream = {
+  id: string;
+  source: string;
+  output: string;
+  uid: number;
+  startedAt: number;
+  state?: 'connecting' | 'running' | 'lost' | 'ended';
+  error?: string;
+  readers?: number;
+  bytes?: number;
+};

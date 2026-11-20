@@ -8,16 +8,18 @@
  * other's certificate. Every request to the
  * system's own EMS that names a file names this endpoint, as `CFG_EMS_FILES_ADDRESS` says EMS
  * reaches it, in its `EMS-Files` header: EMS reads the request's inputs and writes back its outputs
- * here, and nothing else, for as long as the request runs. A request to another instance names it
+ * here, and nothing else, for as long as the request runs. A stream node it writes (a page's video)
+ * has its header and the points a reader may start at marked as they come. A request to another instance names it
  * as that instance reaches it (`ems-instance`'s files address), and the instances are read again
  * every half minute, so one added is served without a restart. With the address empty it serves
  * nothing, and those requests wait. It serves from threads of its own, several connections on
  * several, so pipelines keeping EiN busy do not slow the media service's reads.
  */
 
-import type { CmdReturn, Command } from '@ein/client';
+import { type CmdReturn, type Command, isStreamWriter } from '@ein/client';
 import { FilesServer } from '@ems/files-server';
 import { listInstances } from '@ems/instances';
+import { markedWriter } from '@ems/live/marked';
 
 const DEFAULT_PORT = 2224;
 
@@ -45,7 +47,13 @@ const emsFiles = async (cmd: Command): CmdReturn => {
   const [primary] = await targetsOf(cmd, address);
   const url = primary.emsUrl;
   const nodes = {
-    open: (path: string, mode: 'read' | 'write') => cmd.sys.vfs.open(cmd.access, path, { mode: mode === 'read' ? 'r' as const : 'w' as const }),
+    open: async (path: string, mode: 'read' | 'write') => {
+      const handle = await cmd.sys.vfs.open(cmd.access, path, { mode: mode === 'read' ? 'r' as const : 'w' as const });
+      if (mode === 'read' || !isStreamWriter(handle)) return handle;
+      // A stream EMS writes has its header and start points marked, by its media type.
+      const node = await cmd.sys.vfs.get(cmd.access, path);
+      return markedWriter(handle, typeof node.attrs.mimetype === 'string' ? node.attrs.mimetype : undefined);
+    },
     stat: async (path: string) => {
       const stat = await cmd.sys.vfs.stat(cmd.access, path);
       return { size: Number(stat.size ?? 0), mtime: typeof stat.mtime === 'number' ? stat.mtime : undefined };

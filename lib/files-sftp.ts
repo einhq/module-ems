@@ -4,7 +4,10 @@
  * `/` and each request's directory are directories, which may be stat'ed and never listed; every
  * other path is one of a request's names or does not exist. A name stands for a file on this host's
  * disk, opened as it is and following its links, or a node of the VFS with no file on disk. An
- * input opens read-only. An output opens write-only and is written in place, truncated first: a
+ * input opens read-only. A stream node's name is its bytes from the moment it was opened, sent here
+ * from EiN's thread as they come and read from a window of them (files-stream.ts), each read
+ * answered on its own as its bytes come; it says a size that never ends. A stream node's name opened
+ * to write is the stream's writer, written in order from its start. An output opens write-only and is written in place, truncated first: a
  * client that writes through a mount (sshfs) has its writes there when its close returns, while
  * the SFTP close may come later, so nothing waits for that close. An output whose file does not
  * exist yet stats as an empty file, since sshfs sends its OPEN and a STAT together and gives up on
@@ -17,6 +20,7 @@
 
 import { OPEN_MODE, type SFTP, STATUS_CODE } from 'ssh2';
 import { canonical, lookup, type Named } from './files.ts';
+import { STREAM_SIZE, StreamWindow } from './files-stream.ts';
 
 /** The most a READ answers with, what OpenSSH's own server allows. */
 const MAX_READ = 256 * 1024 - 2 * 1024;
@@ -37,6 +41,14 @@ export type NodeHandle = {
 export type NodeAccess = {
   open(path: string, mode: Named['mode']): Promise<NodeHandle>;
   stat(path: string): Promise<{ size: number; mtime?: number }>;
+};
+
+/**
+ * What a session reaches of the VFS: a node's calls, and a stream node followed, its bytes given to
+ * `take` as they come and then `null` at its end, until `close`.
+ */
+export type SessionNodes = NodeAccess & {
+  follow(path: string, take: (data: Uint8Array | null) => void): Promise<{ close(): Promise<void> }>;
 };
 
 /** An open file, on disk or in the VFS, as the session reads and writes it. */
@@ -87,6 +99,8 @@ type Open = {
   position: number;
   queued: Queued[];
   draining: boolean;
+  /** A stream's: its window, and when it was opened, its mtime. */
+  stream?: { window: StreamWindow; opened: number };
 };
 
 /** The answers a session sends, which go nowhere once it has ended. */
@@ -116,7 +130,7 @@ export class FilesSession {
   private ended = false;
   private out: Replies = { status: () => {}, handle: () => {}, data: () => {}, attrs: () => {}, name: () => {} };
 
-  constructor(private nodes: NodeAccess, private log: (line: string) => void = () => {}) {}
+  constructor(private nodes: SessionNodes, private log: (line: string) => void = () => {}) {}
 
   attach(sftp: SFTP): void {
     const live = <A extends unknown[]>(send: (...args: A) => void) => (...args: A) => {
@@ -138,7 +152,9 @@ export class FilesSession {
     // A request's handle is a view of a buffer the next packet may overwrite, so it is looked up
     // as the request arrives.
     sftp.on('READ', (reqId: number, handle: Uint8Array, offset: number | bigint, length: number) => {
-      this.enqueue(reqId, this.handleOf(handle), 'read', { op: 'read', reqId, offset: Number(offset), length: Math.min(length, MAX_READ) });
+      const entry = this.handleOf(handle);
+      if (entry?.stream) return void this.readStream(reqId, entry.stream.window, Number(offset), Math.min(length, MAX_READ));
+      this.enqueue(reqId, entry, 'read', { op: 'read', reqId, offset: Number(offset), length: Math.min(length, MAX_READ) });
     });
     sftp.on('WRITE', (reqId: number, handle: Uint8Array, offset: number | bigint, data: Uint8Array) => {
       this.enqueue(reqId, this.handleOf(handle), 'write', { op: 'write', reqId, offset: Number(offset), data });
@@ -240,11 +256,36 @@ export class FilesSession {
     const mode = reading ? 'read' : 'write';
     if (!named || named === 'directory' || reading === writing || named.mode !== mode) return this.refuse(reqId, `open ${filename}`);
     try {
+      if (named.stream && mode === 'read') return this.out.handle(reqId, this.keep(await this.follow(named.node!)));
       const body = named.disk ? await diskBody(named.disk, mode) : nodeBody(await this.nodes.open(named.node!, mode));
       this.out.handle(reqId, this.keep({ kind: mode, body, position: 0, queued: [], draining: false }));
     } catch (error) {
       this.out.status(reqId, statusOf(error));
     }
+  }
+
+  /** A stream node opened: followed from now on into a window its reads are answered from. */
+  private async follow(path: string): Promise<Open> {
+    const window = new StreamWindow();
+    const following = await this.nodes.follow(path, (data) => data ? window.push(data) : window.finish());
+    const body: Body = {
+      seek: () => Promise.resolve(),
+      read: () => Promise.resolve(null),
+      write: () => Promise.reject(new Deno.errors.PermissionDenied('a stream is read')),
+      size: () => Promise.resolve(STREAM_SIZE),
+      close: async () => {
+        window.finish();
+        await following.close();
+      },
+    };
+    return { kind: 'read', body, position: 0, queued: [], draining: false, stream: { window, opened: Date.now() } };
+  }
+
+  /** A READ of a stream, answered as its bytes come, apart from the others waiting on the handle. */
+  private async readStream(reqId: number, window: StreamWindow, offset: number, length: number): Promise<void> {
+    const data = await window.read(offset, length);
+    if (data) this.out.data(reqId, data);
+    else this.out.status(reqId, STATUS_CODE.EOF);
   }
 
   /** READs of neighbouring ranges, read with one call and answered from it; past the end is EOF. */
@@ -299,7 +340,7 @@ export class FilesSession {
 
   private async fstat(reqId: number, entry: Open): Promise<void> {
     try {
-      this.out.attrs(reqId, attrs(false, await entry.body.size(), Date.now()));
+      this.out.attrs(reqId, attrs(false, await entry.body.size(), entry.stream?.opened ?? Date.now()));
     } catch (error) {
       this.out.status(reqId, statusOf(error));
     }
@@ -311,6 +352,7 @@ export class FilesSession {
     if (!named) return this.refuse(reqId, `stat ${filename}`);
     try {
       if (named === 'directory') return this.out.attrs(reqId, attrs(true, 0, Date.now()));
+      if (named.stream) return this.out.attrs(reqId, attrs(false, STREAM_SIZE, Date.now()));
       if (named.disk) {
         const info = await Deno.stat(named.disk).catch((error) => {
           if (named.mode === 'write' && error instanceof Deno.errors.NotFound) return { size: 0, mtime: new Date() };

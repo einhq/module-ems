@@ -11,14 +11,19 @@
 
 import { SFTP } from 'ssh2';
 import { type Link, WINDOW } from './files-listen.ts';
-import { FilesSession, type NodeAccess, type NodeHandle } from './files-sftp.ts';
+import { FilesSession, type NodeHandle, type SessionNodes } from './files-sftp.ts';
 import { changeNames, type Named, type NamesChange } from './files.ts';
 
 export const THREAD_URL = import.meta.url;
 
-/** A call on the VFS, which EiN's thread makes; a handle is the number its open answered. */
+/**
+ * A call on the VFS, which EiN's thread makes; a handle is the number its open answered. `follow`
+ * opens a stream node and sends its bytes to `port` as they come, then `null` at its end, until the
+ * handle it answers is closed.
+ */
 export type NodeCall =
   | { call: 'open'; path: string; mode: Named['mode'] }
+  | { call: 'follow'; path: string; port: MessagePort }
   | { call: 'stat'; path: string }
   | { call: 'seek'; handle: number; offset: number }
   | { call: 'read'; handle: number; size: number }
@@ -71,7 +76,7 @@ class LinkSession {
   constructor(
     private id: number,
     private send: (message: Link, transfer?: Transferable[]) => void,
-    nodes: NodeAccess,
+    nodes: SessionNodes,
     log: (line: string) => void,
     private done: () => void,
   ) {
@@ -156,6 +161,8 @@ const serve = (scope: Scope): void => {
     if (call.call === 'write') {
       const data = call.data.slice();
       post({ op: 'node', id, ...call, data }, [data.buffer]);
+    } else if (call.call === 'follow') {
+      post({ op: 'node', id, ...call }, [call.port]);
     } else {
       post({ op: 'node', id, ...call });
     }
@@ -168,9 +175,23 @@ const serve = (scope: Scope): void => {
     size: () => ask({ call: 'size', handle }),
     close: () => ask({ call: 'close', handle }),
   });
-  const nodes: NodeAccess = {
+  const nodes: SessionNodes = {
     open: async (path, mode) => handleOf(await ask<number>({ call: 'open', path, mode })),
     stat: (path) => ask({ call: 'stat', path }),
+    follow: async (path, take) => {
+      const { port1, port2 } = new MessageChannel();
+      port1.onmessage = ({ data }: MessageEvent<Uint8Array | null>) => take(data);
+      const handle = await ask<number>({ call: 'follow', path, port: port2 }).catch((error) => {
+        port1.close();
+        throw error;
+      });
+      return {
+        close: async () => {
+          port1.close();
+          await ask({ call: 'close', handle });
+        },
+      };
+    },
   };
 
   const sessions = new Map<number, LinkSession>();

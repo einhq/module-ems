@@ -9,11 +9,14 @@
  * through that endpoint. With `CFG_EMS_FILES_ADDRESS` empty, or the service not serving yet, no
  * request that names a file goes: EMS counts as unavailable.
  *
- * Watches (`putWatch`, `watchEvents`, …) are EMS's live streams read for their faces: they name no
- * file, only the stream, and their events come as they happen. A watch's clips are videos EMS cut of
+ * Watches (`putWatch`, `watchEvents`, …) are EMS's live streams read for their faces: a watch names
+ * stream nodes, which it reads through names `ems-files` grants for as long as it runs (`forRunning`),
+ * and its events come as they happen. A watch's clips are videos EMS cut of
  * its stream, fetched from EMS by id (`clipBody`) and then dropped there (`dropClip`). Pages
- * (`putPage`, `pageBody`, …) are EMS's renderings of a web page as live video, read by as many as
- * read them, which name no file either.
+ * (`putPage`, …) are EMS's renderings of a web page as live video, written into stream nodes
+ * `ems-files` grants for as long as the page runs, and transcodes (`putTranscode`, …) a live stream
+ * EMS reads and writes, as H.264, into another, through names granted the same way. A picture of a
+ * live stream (`streamPoster`) is an op like any other, its stream node granted for the request.
  *
  * Three outcomes matter to everything downstream, and they are kept distinct: EMS unreachable
  * (`EmsUnavailableError` — the step fails for its normal retry path), EMS answered with a
@@ -22,10 +25,10 @@
  * There is no in-process fallback: the models are not in this image.
  */
 
-import type { Command, ServedFile } from '@ein/client';
+import type { Command } from '@ein/client';
 import type { EmsCapabilities, EmsDegradation } from '@ems/api';
 import { STEP_EXIT_INPUT, STEP_EXIT_TEMPORARY } from '@ein/client';
-import { forRequest } from './files.ts';
+import { endRunning, forRequest, forRunning } from './files.ts';
 import { currentTranscripts, type EmsInstance, instanceName, otherInstanceNames, primaryInstance, readInstance, sameGenerations } from './instances.ts';
 
 const API_MAJOR = 'v0';
@@ -329,7 +332,7 @@ class ConnectError extends Error {}
  * queued model request — so a killed pipeline step must actually close it. `cmd.interrupted` is
  * polled rather than `cmd.onInterrupt` registered, because a bin owns that single handler.
  */
-const fetchOnce = async (cmd: Command, op: string, url: string, init: RequestInit, waitMs: number | undefined): Promise<Response> => {
+const fetchOnce = async (cmd: Pick<Command, 'interrupted'>, op: string, url: string, init: RequestInit, waitMs: number | undefined): Promise<Response> => {
   const controller = new AbortController();
   let why: 'timeout' | 'interrupted' | undefined;
   const timer = waitMs === undefined ? undefined : setTimeout(() => {
@@ -1035,6 +1038,19 @@ export const poster = async (cmd: Command, path: string, opts: PosterOptions): P
   return { ...renditionsOf(raw, opts.targets, answer), t: raw.t };
 };
 
+/** How long a picture of a live stream may take: someone is waiting for it. */
+const STREAM_POSTER_SECONDS = 20;
+
+/**
+ * The first keyframe of the stream node `source` that comes (a camera's `main.ts`), fitted into
+ * rendition targets like a photo, ahead of batch work.
+ */
+export const streamPoster = async (cmd: Command, source: string, targets: RenditionTarget[]): Promise<RenditionsResult> => {
+  const body = { source: { path: source }, targets: targetBodies(targets, targets.map((t) => t.output)) };
+  const answer = await request(cmd, 'video.poster', body, { timeoutSeconds: STREAM_POSTER_SECONDS, priority: 'interactive' });
+  return renditionsOf(answer.result as { frame: { width: number; height: number }; targets: Rendition[] }, targets, answer);
+};
+
 type WaveformStyle = { foreground?: string; background?: string; baseline?: string | null; aspect?: number };
 type WaveformOptions = { mimetype?: string; targets: RenditionTarget[]; style?: WaveformStyle };
 
@@ -1608,22 +1624,22 @@ export const health = async (cmd: Command, instance?: EmsInstance): Promise<Heal
 };
 
 /**
- * What a watch reads and how (EMS 4.24): the stream, its faces and motion, whether a face's crop
- * comes, and the clips it cuts of the stream: what opens one, the seconds before and after it, the
- * longest, and the stream recorded when not the one watched.
+ * What a watch reads and how (EMS 4.24): the stream, a stream node's VFS path, its faces and motion,
+ * whether a face's crop comes, and the clips it cuts of the stream: what opens one, the seconds
+ * before and after it, the longest, and the stream node recorded when not the one watched.
  */
 export type WatchSpec = {
-  source: string;
+  source: { path: string };
   faces?: { fps?: number; min_size?: number; min_confidence?: number };
   motion?: boolean;
   mask?: Box[];
   angle?: 0 | 90 | 180 | 270;
   mirror?: boolean;
   crops?: boolean;
-  clips?: { on?: ('face' | 'motion')[]; pre?: number; post?: number; max?: number; source?: string };
+  clips?: { on?: ('face' | 'motion')[]; pre?: number; post?: number; max?: number; source?: { path: string } };
 };
 
-/** A watch as EMS reports it; `source` without its password. */
+/** A watch as EMS reports it; `source` the name it reads. */
 type WatchStatus = {
   id: string;
   source: string;
@@ -1677,20 +1693,21 @@ type WatchClip = { clip: string; start: string; end: string; duration: number; s
  * `ROUTE_REQUEST_MS` unless said.
  */
 const routeRequest = async (
-  cmd: Command,
+  cmd: Pick<Command, 'interrupted'>,
   instance: EmsInstance,
   what: string,
   method: string,
   path: string,
   body?: unknown,
   timeoutMs = ROUTE_REQUEST_MS,
+  extra: Record<string, string> = {},
 ): Promise<unknown> => {
   const ems = who(instance);
   let response: Response;
   try {
     response = await fetchOnce(cmd, `${what} ${method}`, `${instance.url}/${API_MAJOR}/${path}`, {
       method,
-      headers: headers(instance),
+      headers: { ...headers(instance), ...extra },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
     }, timeoutMs);
   } catch (error) {
@@ -1725,16 +1742,33 @@ export const setCardShare = async (cmd: Command, instance: EmsInstance, shareMb:
   return { shareMb: result.share_mb ?? null, unloaded: result.unloaded ?? [] };
 };
 
-/** Make the watch `id`, or leave it running when EMS has it with this spec already. */
-export const putWatch = async (cmd: Command, id: string, spec: WatchSpec): Promise<WatchStatus> =>
-  await watchRequest(cmd, 'PUT', `watches/${encodeURIComponent(id)}`, spec) as WatchStatus;
+/**
+ * Make the watch `id`, or leave it running when EMS has it with this spec already: its stream nodes
+ * granted to EMS for as long as the watch runs, the same names each time it is stated with the same
+ * spec. `EmsUnavailableError` while `ems-files` serves EMS nothing.
+ */
+export const putWatch = async (cmd: Command, id: string, spec: WatchSpec): Promise<WatchStatus> => {
+  const instance = await emsInstance(cmd);
+  const granted = await forRunning(cmd, instance.url, `watches/${id}`, spec);
+  if (!granted) throw new EmsUnavailableError(`${who(instance)}: watch ${id}: ems-files serves no files (CFG_EMS_FILES_ADDRESS, the ems-files service)`);
+  try {
+    return await routeRequest(cmd, instance, 'watches', 'PUT', `watches/${encodeURIComponent(id)}`, granted.body, ROUTE_REQUEST_MS, granted.headers) as WatchStatus;
+  } finally {
+    await granted.settled();
+  }
+};
 
 /** Every watch the instance runs, whoever stated it. */
 export const listWatches = async (cmd: Command): Promise<WatchStatus[]> => await watchRequest(cmd, 'GET', 'watches') as WatchStatus[];
 
-/** Stop the watch `id`. */
+/** Stop the watch `id`, and end the names its streams were granted under. */
 export const deleteWatch = async (cmd: Command, id: string): Promise<void> => {
-  await watchRequest(cmd, 'DELETE', `watches/${encodeURIComponent(id)}`);
+  const instance = await emsInstance(cmd);
+  try {
+    await routeRequest(cmd, instance, 'watches', 'DELETE', `watches/${encodeURIComponent(id)}`);
+  } finally {
+    await endRunning(instance.url, `watches/${id}`);
+  }
 };
 
 /** Open a clip of the watch `id` now, or lengthen the open one, `post` seconds on; answers its id. */
@@ -1768,12 +1802,14 @@ export const dropClip = async (cmd: Command, id: string, clip: string): Promise<
   await watchRequest(cmd, 'DELETE', `watches/${encodeURIComponent(id)}/clips/${encodeURIComponent(clip)}`);
 };
 
-/** A page EMS renders into live video (EMS 4.25): the page as EMS reaches it, its picture, and how long it runs unread. */
+/**
+ * A page EMS renders into live video (EMS 4.25): the page as EMS reaches it, its picture, and the
+ * stream nodes it writes each form into, as `ems-files` names them.
+ */
 type PageSpec = {
   url: string;
   video?: { width?: number; height?: number; fps?: number; quality?: number };
-  /** Seconds without a reader after which EMS stops it. */
-  idle?: number;
+  output: { mp4: { path: string }; ts: { path: string } };
 };
 
 /** A page EMS renders, as it says how it is doing. */
@@ -1783,10 +1819,7 @@ export type PageStatus = {
   state: 'starting' | 'running' | 'ended';
   since: string;
   video: { width: number; height: number; fps: number; quality: number };
-  idle: number;
   encoder: string | null;
-  /** Readers of each form; `hls` is 1 while a file of the HLS form was asked for within 5 s. */
-  readers: { mp4: number; ts: number; hls: number };
   bytes: number;
   memory_mb?: number;
   /** Why it ended. */
@@ -1794,16 +1827,16 @@ export type PageStatus = {
   made?: boolean;
 };
 
-/** A page's stream as a Cast player (`mp4`) or a DLNA screen (`ts`) reads it. */
-type PageFormat = 'mp4' | 'ts';
-
 // A page answers once its stream has its first keyframe, which EMS gives up on after 30 s, and the
 // page has painted, which it waits 15 s more for.
 const PAGE_START_MS = 55_000;
 
-/** Start rendering the page `id` on `instance`, or leave it running when EMS has it with this spec already. */
-export const putPage = async (cmd: Command, instance: EmsInstance, id: string, spec: PageSpec): Promise<PageStatus> =>
-  await routeRequest(cmd, instance, 'pages', 'PUT', `pages/${encodeURIComponent(id)}`, spec, PAGE_START_MS) as PageStatus;
+/**
+ * Start rendering the page `id` on `instance`, or leave it running when EMS has it with this spec
+ * already; `headers` name the endpoint its stream nodes are written through.
+ */
+export const putPage = async (cmd: Command, instance: EmsInstance, id: string, spec: PageSpec, headers: Record<string, string>): Promise<PageStatus> =>
+  await routeRequest(cmd, instance, 'pages', 'PUT', `pages/${encodeURIComponent(id)}`, spec, PAGE_START_MS, headers) as PageStatus;
 
 /** Press the keys `keys` in the page `id` (`ArrowRight`, `Space`, a letter or a digit), in turn, as someone at it would (EMS 0.4.7). */
 export const pressPageKeys = async (cmd: Command, instance: EmsInstance, id: string, keys: string[]): Promise<void> => {
@@ -1822,7 +1855,7 @@ export const pageMessage = async (cmd: Command, instance: EmsInstance, id: strin
 export const listPages = async (cmd: Command, instance: EmsInstance): Promise<PageStatus[]> => await routeRequest(cmd, instance, 'pages', 'GET', 'pages') as PageStatus[];
 
 /** Stop rendering the page `id`; one EMS no longer has is stopped already. */
-export const deletePage = async (cmd: Command, instance: EmsInstance, id: string): Promise<void> => {
+export const deletePage = async (cmd: Pick<Command, 'interrupted'>, instance: EmsInstance, id: string): Promise<void> => {
   try {
     await routeRequest(cmd, instance, 'pages', 'DELETE', `pages/${encodeURIComponent(id)}`);
   } catch (error) {
@@ -1831,44 +1864,52 @@ export const deletePage = async (cmd: Command, instance: EmsInstance, id: string
 };
 
 /**
- * One reader's stream of the page `id` in `format`, without end; cancelling it lets EMS's reader
- * go. With `duration`, an MP4's header says it lasts that many seconds (EMS 0.4.6). Undefined once
- * the page has ended, or EMS no longer has it.
+ * A live stream EMS transcodes into another (EMS 4.26): the stream read, the one written, as
+ * `ems-files` names them, what it is written as, and the picture's most height.
  */
-export const pageBody = async (instance: EmsInstance, id: string, format: PageFormat, duration?: number): Promise<ReadableStream<Uint8Array> | undefined> => {
-  let response: Response;
-  try {
-    const declared = format === 'mp4' && duration ? `?duration=${duration}` : '';
-    response = await fetch(`${instance.url}/${API_MAJOR}/pages/${encodeURIComponent(id)}/live.${format}${declared}`, { headers: headers(instance) });
-  } catch (error) {
-    throw new EmsUnavailableError(`${who(instance)}: page ${id} unreachable: ${error instanceof Error ? error.message : String(error)}`);
-  }
-  if (response.ok && response.body) return response.body;
-  const envelope = await response.json().catch(() => undefined) as Envelope | undefined;
-  const code = envelope?.error?.code ?? `http_${response.status}`;
-  if (code === 'not_found') return undefined;
-  const message = envelope?.error?.message ?? `HTTP ${response.status}`;
-  if (code === 'busy') throw new EmsUnavailableError(`${who(instance)}: page ${id} ${message} (${code})`);
-  throw new EmsError('pages', code, message, envelope?.error?.permanent === true, response.status);
+type TranscodeSpec = {
+  source: { path: string };
+  output: { path: string };
+  format?: 'mpegts' | 'mp4';
+  video?: { height?: number; quality?: number };
+};
+
+/** A live stream EMS transcodes, as it says how it is doing. */
+type TranscodeStatus = {
+  id: string;
+  source: string;
+  output: string;
+  state: 'connecting' | 'running' | 'lost' | 'ended';
+  since: string;
+  format: 'mpegts' | 'mp4';
+  video: { height: number | null; quality: number };
+  encoder: string;
+  bytes: number;
+  /** Why the source is lost. */
+  error?: string;
+  /** Why it ended. */
+  reason?: string;
+  made?: boolean;
 };
 
 /**
- * The file `name` of page `id`'s HLS form (`index.m3u8`, `index<n>.ts`); undefined when EMS has no
- * such file, or the page has ended. Throws when EMS cannot answer now, as when the playlist is not
- * written yet, which the player is told to ask again.
+ * Start transcoding on `instance` as `spec` says, or leave it running when EMS has it with this spec
+ * already; `headers` name the endpoint its streams are read and written through.
  */
-export const pageFile = async (instance: EmsInstance, id: string, name: string): Promise<ServedFile | undefined> => {
-  let response: Response;
+export const putTranscode = async (cmd: Command, instance: EmsInstance, id: string, spec: TranscodeSpec, headers: Record<string, string>): Promise<TranscodeStatus> =>
+  await routeRequest(cmd, instance, 'transcodes', 'PUT', `transcodes/${encodeURIComponent(id)}`, spec, ROUTE_REQUEST_MS, headers) as TranscodeStatus;
+
+/** Every transcode `instance` runs, and those that ended in the last minute. */
+export const listTranscodes = async (cmd: Command, instance: EmsInstance): Promise<TranscodeStatus[]> =>
+  await routeRequest(cmd, instance, 'transcodes', 'GET', 'transcodes') as TranscodeStatus[];
+
+/** Stop the transcode `id`; one EMS no longer has is stopped already. */
+export const deleteTranscode = async (cmd: Pick<Command, 'interrupted'>, instance: EmsInstance, id: string): Promise<void> => {
   try {
-    response = await fetch(`${instance.url}/${API_MAJOR}/pages/${encodeURIComponent(id)}/hls/${encodeURIComponent(name)}`, { headers: headers(instance) });
+    await routeRequest(cmd, instance, 'transcodes', 'DELETE', `transcodes/${encodeURIComponent(id)}`);
   } catch (error) {
-    throw new EmsUnavailableError(`${who(instance)}: page ${id} unreachable: ${error instanceof Error ? error.message : String(error)}`);
+    if (!(error instanceof EmsError && error.code === 'not_found')) throw error;
   }
-  if (response.ok) return { body: new Uint8Array(await response.arrayBuffer()), type: response.headers.get('content-type') ?? 'application/octet-stream' };
-  const envelope = await response.json().catch(() => undefined) as Envelope | undefined;
-  const code = envelope?.error?.code ?? `http_${response.status}`;
-  if (code === 'not_found') return undefined;
-  throw new EmsUnavailableError(`${who(instance)}: page ${id}: ${envelope?.error?.message ?? `HTTP ${response.status}`} (${code})`);
 };
 
 /**

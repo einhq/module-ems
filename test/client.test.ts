@@ -555,7 +555,7 @@ Deno.test("a watch's clip is asked for, fetched and dropped, and one EMS lacks i
   const stub = startStubEms();
   try {
     const { cmd } = makeCmd({ CFG_EMS_URL: stub.url });
-    await putWatch(cmd, 'ein-porch-sub', { source: 'rtsp://192.0.2.1:8554/porch-sub', clips: { on: ['face'], source: 'rtsp://192.0.2.1:8554/porch-main' } });
+    await putWatch(cmd, 'ein-porch-sub', { source: { path: '/dev/porch/sub.ts' }, clips: { on: ['face'], source: { path: '/dev/porch/main.ts' } } });
     const asked = await requestClip(cmd, 'ein-porch-sub', 5);
     stub.clips.set(`ein-porch-sub/${asked}`, new Uint8Array([1, 2, 3]));
     assertEquals(new Uint8Array(await new Response(await clipBody(cmd, 'ein-porch-sub', asked)).arrayBuffer()), new Uint8Array([1, 2, 3]));
@@ -571,9 +571,17 @@ Deno.test('a watch is put, listed and followed until it is deleted, and one EMS 
   const stub = startStubEms();
   try {
     const { cmd } = makeCmd({ CFG_EMS_URL: stub.url });
-    const spec = { source: 'rtsp://ein:x@192.0.2.1:8554/front-door-sub', faces: { fps: 3 } };
+    const spec = { source: { path: '/dev/front-door/sub.ts' }, faces: { fps: 3 } };
     assertEquals((await putWatch(cmd, 'ein-front-door-sub', spec)).made, true);
+    // Its stream goes by a name granted for as long as it runs, the same each time it is stated.
+    const name = (stub.watches.get('ein-front-door-sub')!.source as { path: string }).path;
+    assert(name.endsWith('/0-sub.ts') && filesState().names.has(name), name);
     assertEquals((await putWatch(cmd, 'ein-front-door-sub', spec)).made, false);
+    assertEquals((stub.watches.get('ein-front-door-sub')!.source as { path: string }).path, name);
+    // Another spec is granted names of its own, and the old end.
+    assertEquals((await putWatch(cmd, 'ein-front-door-sub', { ...spec, motion: false })).made, true);
+    const renamed = (stub.watches.get('ein-front-door-sub')!.source as { path: string }).path;
+    assert(renamed !== name && filesState().names.has(renamed) && !filesState().names.has(name));
     assertEquals((await listWatches(cmd)).map((watch) => watch.id), ['ein-front-door-sub']);
 
     const heard: WatchEvent[] = [];
@@ -586,6 +594,7 @@ Deno.test('a watch is put, listed and followed until it is deleted, and one EMS 
     await following;
     assertEquals(heard.map((event) => event.type), ['motion', 'face']);
     assertEquals(stub.watches.size, 0);
+    assert(!filesState().names.has(renamed));
     await assertRejects(() => clipBody(cmd, 'ein-front-door-sub', 'gone'), EmsError, 'no watch');
     await assertRejects(
       () =>

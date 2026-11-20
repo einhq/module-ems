@@ -5,7 +5,7 @@ import manifest from '../mod.json' with { type: 'json' };
 
 const base: HealthResult = {
   ok: true,
-  api: '0.4.8',
+  api: '0.6.1',
   uptime: 60,
   gpu: { present: true },
   models: {},
@@ -154,10 +154,10 @@ Deno.test("health's checks: EMS away only waits; a card the host should have and
 });
 
 Deno.test("health's checks: an API this module does not speak is a person's, older or newer", () => {
-  assertEquals(apiCheck('0.4.8'), undefined);
-  assertEquals(apiCheck('0.4.9'), undefined);
-  assertEquals(apiCheck('0.4.7'), `EMS speaks API 0.4.7, older than the ${EMS_API_RANGE} this module needs: update the media service`);
-  assertEquals(apiCheck('0.5.0'), `EMS speaks API 0.5.0, newer than the ${EMS_API_RANGE} this module knows: update the ems module`);
+  assertEquals(apiCheck('0.6.0'), `EMS speaks API 0.6.0, older than the ${EMS_API_RANGE} this module needs: update the media service`);
+  assertEquals(apiCheck('0.6.1'), undefined);
+  assertEquals(apiCheck('0.5.0'), `EMS speaks API 0.5.0, older than the ${EMS_API_RANGE} this module needs: update the media service`);
+  assertEquals(apiCheck('0.7.0'), `EMS speaks API 0.7.0, newer than the ${EMS_API_RANGE} this module knows: update the ems module`);
   assertEquals(apiCheck('x')?.startsWith('EMS reports API "x", not a version'), true);
 
   const checks = checksOf(statusFromHealth({ ...base, api: '0.3.6' }, 'http://ems'), 'laptop');

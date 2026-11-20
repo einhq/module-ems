@@ -5,8 +5,10 @@
  * EMS has no files of its own; the `ems-files` service serves it a request's over SFTP. Each request
  * gets a directory of its own, `/<grant>/`, and each file it names a name there, `<n>-<its VFS
  * name>`: the request's body says those names, and the endpoint knows what each stands for — a file
- * on this host's disk, or a node read or written through the VFS — for as long as the request runs.
- * Nothing else is there, and nothing is listed. The VFS name keeps the original's extension, which
+ * on this host's disk, a node read or written through the VFS, or a stream node whose bytes are
+ * read from the moment the name is opened, or written by its one writer — for as long as the
+ * request runs (a watch's or a page's for as long as it runs). Nothing else is there, and nothing
+ * is listed. The VFS name keeps the original's extension, which
  * tools pick a format by.
  *
  * The state hangs off `globalThis` rather than this file: a module's files are loaded once per
@@ -24,8 +26,13 @@ export type Named = {
   mode: 'read' | 'write';
   /** The file on this host's disk, when there is one. */
   disk?: string;
-  /** The VFS path of a node with no file on disk (the db tier), read or written through the VFS. */
+  /** The VFS path of a node with no file on disk (the db tier, a stream), read or written through the VFS. */
   node?: string;
+  /**
+   * Set for a stream node: read, its bytes from the moment the name is opened, without end; written,
+   * its one writer, in order.
+   */
+  stream?: true;
 };
 
 /** An endpoint that serves a media service the files of its requests, as the client names it to EMS. */
@@ -46,11 +53,21 @@ export type NamesChange = { set?: [string, Named][]; grants?: string[]; ended?: 
 /** A copy of the names elsewhere; the promise settles once the copy has the change. */
 export type NamesMirror = (change: NamesChange) => Promise<void>;
 
+/** The names of something EMS runs (a watch, a page): its body with them, the header naming their endpoint, and what ends them. */
+type RunningGrant = { key: string; body: unknown; headers: Record<string, string>; release: () => Promise<void> };
+
 /**
  * `endpoints` by the media service they serve; `names` by their full path, `/<grant>/<n>-<name>`;
- * `grants` are the requests' directories; `mirrors` the copies kept of them.
+ * `grants` are the requests' directories; `mirrors` the copies kept of them; `running` the names of
+ * what EMS runs for as long as it runs, by `<media service> <what>/<id>`.
  */
-type FilesState = { endpoints: Map<string, FilesEndpoint>; names: Map<string, Named>; grants: Set<string>; mirrors: Set<NamesMirror> };
+type FilesState = {
+  endpoints: Map<string, FilesEndpoint>;
+  names: Map<string, Named>;
+  grants: Set<string>;
+  mirrors: Set<NamesMirror>;
+  running: Map<string, RunningGrant>;
+};
 
 const STATE = Symbol.for('ein.ems.files.names');
 
@@ -62,6 +79,7 @@ export const filesState = (): FilesState => {
   state.names ??= new Map();
   state.grants ??= new Set();
   state.mirrors ??= new Set();
+  state.running ??= new Map();
   return state as FilesState;
 };
 
@@ -111,7 +129,13 @@ export const grant = async (
     let named: Named = { mode, disk: path };
     try {
       const physical = (await cmd.sys.vfs.stat(cmd.access, path)).path;
-      named = typeof physical === 'string' && physical ? { mode, disk: physical } : { mode, node: path };
+      if (typeof physical === 'string' && physical) {
+        named = { mode, disk: physical };
+      } else {
+        // A node with no file on disk: the db tier, or a stream, which is read or written as it comes.
+        const stream = await cmd.sys.vfs.get(cmd.access, path).then((node) => node.type === 'stream', () => false);
+        named = { mode, node: path, ...(stream ? { stream: true as const } : {}) };
+      }
     } catch {
       // Not a node: a file on disk.
     }
@@ -128,9 +152,9 @@ export const grant = async (
 
 /**
  * For one request to `emsUrl`: the body to send, each `file.path`, `mask.path` and `source.path` (read) and
- * `output.path` (written) in it at any depth replaced by its name, the header naming the endpoint, and `release`,
- * which ends the names. A body that names no file goes as it is; one that does, when nothing serves
- * `emsUrl` its files, is undefined.
+ * `output.path` or `output.<name>.path` (written) in it at any depth replaced by its name, the header naming the
+ * endpoint, and `release`, which ends the names. A body that names no file goes as it is; one that does, when
+ * nothing serves `emsUrl` its files, is undefined.
  */
 export const forRequest = async <T>(
   cmd: Pick<Command, 'sys' | 'access'>,
@@ -149,6 +173,13 @@ export const forRequest = async <T>(
       if ((key === 'file' || key === 'mask' || key === 'source' || key === 'output') && ref && typeof ref === 'object' && typeof ref.path === 'string') {
         paths.push({ path: ref.path, mode: key === 'output' ? 'write' : 'read' });
         refs.push(ref);
+      } else if (key === 'output' && ref && typeof ref === 'object' && !Array.isArray(ref)) {
+        // Several outputs by name, as a page's formats.
+        for (const each of Object.values(ref)) {
+          if (!each || typeof each !== 'object' || typeof (each as Record<string, unknown>).path !== 'string') continue;
+          paths.push({ path: (each as Record<string, string>).path, mode: 'write' });
+          refs.push(each as Record<string, unknown>);
+        }
       }
     }
     return out;
@@ -160,4 +191,38 @@ export const forRequest = async <T>(
   const { names, release } = await grant(cmd, paths);
   refs.forEach((ref, index) => ref.path = names[index]);
   return { body: sent, headers: { 'ems-files': headerValue(endpoint) }, release };
+};
+
+/**
+ * For what `emsUrl` runs as `slot` (`watches/<id>`, `pages/<id>`): its body with each file's path
+ * replaced by a name granted for as long as it runs, and the header naming the endpoint. The same
+ * body stated again to the same endpoint keeps its names, so the media service sees the same thing
+ * and leaves it running; another body, or an endpoint started anew, is granted new names, and
+ * `settled`, once the media service has been told, ends the old ones. Undefined when nothing serves
+ * `emsUrl` its files.
+ */
+export const forRunning = async <T>(
+  cmd: Pick<Command, 'sys' | 'access'>,
+  emsUrl: string,
+  slot: string,
+  body: T,
+): Promise<{ body: T; headers: Record<string, string>; settled: () => Promise<void> } | undefined> => {
+  const { endpoints, running } = filesState();
+  const endpoint = endpoints.get(emsUrl);
+  if (!endpoint) return undefined;
+  const key = `${headerValue(endpoint)}\n${JSON.stringify(body)}`;
+  const held = running.get(`${emsUrl} ${slot}`);
+  if (held?.key === key) return { body: held.body as T, headers: held.headers, settled: () => Promise.resolve() };
+  const granted = await forRequest(cmd, emsUrl, body);
+  if (!granted) return undefined;
+  running.set(`${emsUrl} ${slot}`, { key, body: granted.body, headers: granted.headers, release: granted.release });
+  return { body: granted.body, headers: granted.headers, settled: async () => await held?.release() };
+};
+
+/** What `emsUrl` ran as `slot` stopped: the names it was granted end. */
+export const endRunning = async (emsUrl: string, slot: string): Promise<void> => {
+  const { running } = filesState();
+  const held = running.get(`${emsUrl} ${slot}`);
+  running.delete(`${emsUrl} ${slot}`);
+  await held?.release();
 };

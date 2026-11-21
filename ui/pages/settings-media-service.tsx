@@ -80,13 +80,13 @@ export default function MediaServiceSettings() {
   const shown = draft.share === '' ? total ?? 0 : Math.min(Number(draft.share), total ?? Number(draft.share));
 
   const write = async (): Promise<ConfigWriteAnswer[]> => {
-    const answers = [
-      await config.saveAll({
-        ...(draft.url.trim() !== saved.url ? { CFG_EMS_URL: draft.url.trim() } : {}),
-        ...(draft.key ? { CFG_EMS_KEY: draft.key } : {}),
-        ...(draft.share !== saved.share && draft.share !== '' ? { CFG_EMS_CARD_SHARE_MB: draft.share } : {}),
-      }),
-    ];
+    const values = {
+      ...(draft.url.trim() !== saved.url ? { CFG_EMS_URL: draft.url.trim() } : {}),
+      ...(draft.key ? { CFG_EMS_KEY: draft.key } : {}),
+      ...(draft.share !== saved.share && draft.share !== '' ? { CFG_EMS_CARD_SHARE_MB: draft.share } : {}),
+    };
+    // Only the share set back to the media service's own leaves nothing to write.
+    const answers = Object.keys(values).length ? [await config.saveAll(values)] : [];
     // The media service's own share again: the value set here goes.
     if (draft.share !== saved.share && draft.share === '') answers.push(await config.resetAll(['CFG_EMS_CARD_SHARE_MB']));
     // Another media service without a key of its own: the one set here was the old one's.

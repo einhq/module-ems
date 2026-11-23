@@ -15,10 +15,13 @@
  * reader for its idle seconds.
  *
  * The media service reaches the page at `CFG_EMS_PAGE_ADDRESS`, or where it reaches EiN's files
- * (`CFG_EMS_FILES_ADDRESS`) at EiN's own HTTP port. The streams are kept in this process's memory.
+ * (`CFG_EMS_FILES_ADDRESS`) at EiN's own HTTP port, as the system's files hold them, and the page
+ * goes only to the media service the system's `CFG_EMS_URL` names: a caller's environment never
+ * says where the media service's browser goes, nor who is handed the page's address, which signs
+ * whoever opens it in. The streams are kept in this process's memory.
  */
 
-import { type Access, ADMIN_ACCESS, type Command, type ModuleDevices, type ServedFile } from '@ein/client';
+import { type Access, ADMIN_ACCESS, type Command, type ModuleDevices, readSystemSettings, type ServedFile } from '@ein/client';
 import { deletePage, EmsBusyError, emsInstance, EmsUnavailableError, listPages, pageMessage, pageState, pressPageKeys, putPage } from './client.ts';
 import { endRunning, forRunning } from './files.ts';
 import type { EmsInstance } from './instances.ts';
@@ -83,15 +86,35 @@ const REMOTE_SECONDS = 86_400;
 /** Calls to the media service made after the command that started the stream is gone: never interrupted. */
 const LASTING = { interrupted: false };
 
-/** `http://host:port` where the media service reaches this EiN's pages. */
-export const pageOrigin = (env: Record<string, string>): string => {
-  const own = (env.CFG_EMS_PAGE_ADDRESS ?? '').trim();
+/** `http://host:port` where the media service reaches this EiN's pages, from the system's `settings`. */
+export const pageOrigin = (settings: Readonly<Record<string, string>>): string => {
+  const own = (settings.CFG_EMS_PAGE_ADDRESS ?? '').trim();
   if (own) return `http://${own}`;
-  const files = (env.CFG_EMS_FILES_ADDRESS ?? '').trim();
+  const files = (settings.CFG_EMS_FILES_ADDRESS ?? '').trim();
   const host = files.replace(/:\d+$/, '');
   if (!host) throw new EmsUnavailableError('ems: pages: CFG_EMS_PAGE_ADDRESS and CFG_EMS_FILES_ADDRESS are both empty, so EMS reaches no page of this EiN');
-  return `http://${host}:${(env.CFG_HTTP_PORT ?? '').trim() || '8080'}`;
+  return `http://${host}:${(settings.CFG_HTTP_PORT ?? '').trim() || '8080'}`;
 };
+
+/** The settings that say which media service is handed a page's address. */
+const PAGE_SETTINGS = ['CFG_EMS_URL', 'CFG_EMS_FILES_ADDRESS'] as const;
+
+/**
+ * `cmd`'s environment with the page settings the system's files hold: any shell can set one in front
+ * of a command, and the page's address would then go wherever it points.
+ */
+const pageEnv = async (cmd: Command): Promise<Record<string, string>> => {
+  const system = await readSystemSettings(cmd.sys.vfs);
+  const env = { ...cmd.env };
+  for (const key of PAGE_SETTINGS) {
+    if (system[key] === undefined) delete env[key];
+    else env[key] = system[key];
+  }
+  return env;
+};
+
+/** The media service that renders pages: the one the system's settings name. */
+export const pagesInstance = async (cmd: Command): Promise<EmsInstance> => await emsInstance({ sys: cmd.sys, env: await pageEnv(cmd) });
 
 const devicesOf = (cmd: Command): ModuleDevices => {
   if (!cmd.sys.devices) throw new Error('devices are not running here, and a page is streamed to them');
@@ -131,8 +154,8 @@ const readersOf = async (stream: Pick<Held, 'vfs' | 'path'>): Promise<number> =>
 export const startPageStream = async (cmd: Command, route: string, opts: PageStreamOptions = {}): Promise<PageStream> => {
   const devices = devicesOf(cmd);
   const access = opts.access ?? cmd.access;
-  const origin = pageOrigin(cmd.env);
-  const instance = await emsInstance(cmd);
+  const origin = pageOrigin(await readSystemSettings(cmd.sys.vfs));
+  const instance = await pagesInstance(cmd);
   const id = `page-${crypto.randomUUID().replaceAll('-', '').slice(0, 16)}`;
   const video = {
     ...(opts.width !== undefined ? { width: opts.width } : {}),

@@ -23,9 +23,10 @@
  * slideshow and moving in its video. Those take the caller's own stream, or an administrator's any.
  */
 import { type CmdReturn, collectUnknownFlags, type Command, isAdmin, parseArgs, reportUnknownFlags } from '@ein/client';
-import { emsInstance, listPages, type PageStatus } from '@ems/client';
+import { listPages, type PageStatus } from '@ems/client';
 import {
   forgetEnded,
+  pagesInstance,
   type PageStream,
   pageStreamReaders,
   pageStreams,
@@ -73,7 +74,7 @@ const pageStream = async (cmd: Command): CmdReturn => {
 
     if (sub === 'list') {
       const mine = pageStreams().filter((stream) => isAdmin(cmd.access) || stream.uid === cmd.access.uid);
-      const rendering = await listPages(cmd, await emsInstance(cmd)).catch(() => undefined);
+      const rendering = await listPages(cmd, await pagesInstance(cmd)).catch(() => undefined);
       if (rendering) await forgetEnded(new Set(rendering.filter((page) => page.state !== 'ended').map((page) => page.id)));
       const listed: Listed[] = [];
       for (const stream of mine.filter((stream) => pageStreams().some((each) => each.id === stream.id))) {

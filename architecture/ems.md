@@ -204,8 +204,10 @@ reads its metadata from `media.probe` (phase 3a), and the transcodes are `video.
 plays video and nothing else, so a page of EiN (a dashboard wall, an album's slideshow) reaches it
 as live H.264, with the page's sound as AAC, that EMS makes in a browser of its own. `startPageStream` (`@ems/page-stream`) makes
 two stream nodes, `/tmp/page-streams/<id>.mp4` and `.ts`, whoever asked's alone, asks core for a
-page ticket made from whoever asked (`pageSignIn`) and puts the page in EMS with the address of the ticket as
-EMS reaches EiN, `CFG_EMS_PAGE_ADDRESS` or the host of `CFG_EMS_FILES_ADDRESS` at EiN's HTTP port,
+page ticket made from whoever asked (`pageSignIn`, which refuses the administrator and its group) and puts the page in EMS with the address of the ticket as
+EMS reaches EiN, `CFG_EMS_PAGE_ADDRESS` or the host of `CFG_EMS_FILES_ADDRESS` at EiN's HTTP port
+as the system's files hold them (`readSystemSettings`; a caller's environment never names where
+EMS's browser goes, ein/core#1362), and only to the media service the system's `CFG_EMS_URL` names (ein/core#1361),
 and the two nodes granted to write for as long as the page runs; EMS's browser opens the page,
 which signs it in once, read-only, and EMS writes its encode into the nodes. A Cast or DLNA screen
 reads a node with a file ticket, joining at its latest keyframe. For a screen near a browser the

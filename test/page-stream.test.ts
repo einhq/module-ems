@@ -54,9 +54,13 @@ Deno.test("the media service reaches pages at their own address, else at the fil
 
 Deno.test({ name: 'page-stream', sanitizeResources: false, sanitizeOps: false }, async (t) => {
   const { vfs } = await testCtx.setup();
-  const client = await testCtx.server.createShellClient();
+  const admin = await testCtx.server.createShellClient();
   const ems = startStubEms();
-  const at = `CFG_EMS_URL=${ems.url} CFG_EMS_FILES_ADDRESS=ein.test:2224 CFG_HTTP_PORT=8080`;
+  await admin.execString(`config set CFG_EMS_URL ${ems.url} && config set CFG_EMS_FILES_ADDRESS ein.test:2224`);
+  await admin.execString('user-create anna && user-passwd anna --new-password hunter2');
+  const client = await testCtx.server.createShellClient({ username: 'anna', password: 'hunter2' });
+  /** What a shell may set in front of a command, which a page's address never goes by. */
+  const at = 'CFG_EMS_URL=http://127.0.0.1:9 CFG_EMS_PAGE_ADDRESS=elsewhere.test:80 CFG_HTTP_PORT=81';
   const { baseUrl, devices } = testCtx.harness.instance!;
   /** The media service's writer of a page's stream node, as `ems-files` gives it one. */
   const writerOf = async (path: string, mimetype: string) => {
@@ -69,7 +73,7 @@ Deno.test({ name: 'page-stream', sanitizeResources: false, sanitizeOps: false },
   try {
     let stream: PageStream;
 
-    await t.step('start puts the page with an address that signs its browser in, and its stream nodes to write', async () => {
+    await t.step("start puts the page with an address that signs its browser in, and its stream nodes to write, by the system's settings", async () => {
       stream = await client.execJson<PageStream>(`${at} page-stream start /dashboard-wall/Kitchen --fps=25`);
       assertEquals(stream.route, '/dashboard-wall/Kitchen');
       assertEquals(stream.path, `/tmp/page-streams/${stream.id}`);
@@ -91,11 +95,18 @@ Deno.test({ name: 'page-stream', sanitizeResources: false, sanitizeOps: false },
       assertEquals(signIn.headers.get('location'), '/dashboard-wall/Kitchen');
     });
 
+    await t.step("the media service's browser goes where the system's settings say, whatever the caller's say", async () => {
+      const other = await client.execJson<PageStream>(`${at} CFG_EMS_PAGE_ADDRESS=10.99.0.5:80 CFG_EMS_FILES_ADDRESS=10.99.0.5:2224 page-stream start /dashboard-wall/Hall`);
+      const put = ems.requests.findLast((request) => request.op === 'pages.put')!;
+      assertMatch(String(put.body.url), /^http:\/\/ein\.test:8080\/__page\//);
+      await client.execJson(`${at} page-stream stop ${other.id}`);
+    });
+
     await t.step('a screen reads a node with a file ticket, from its latest keyframe', async () => {
       const ts = await writerOf(`${stream.path}.ts`, 'video/mp2t');
       const second = secondKey();
       await ts.write(TS.subarray(0, second));
-      const { uid } = (await client.execJson<{ attrs: { uid: number } }>('stat /etc/users/admin')).attrs;
+      const { uid } = (await client.execJson<{ attrs: { uid: number } }>('stat /etc/users/anna')).attrs;
       const ticket = await devices.fileTicket({ ...ADMIN_ACCESS, uid }, `${stream.path}.ts`);
       const read = await fetch(`${baseUrl}/file${stream.path}.ts?ticket=${ticket}`);
       assertEquals(read.headers.get('content-type'), 'video/mp2t');
@@ -215,10 +226,19 @@ Deno.test({ name: 'page-stream', sanitizeResources: false, sanitizeOps: false },
 
     await t.step('a page is a path of this EiN', async () => {
       await testCommands(client).shouldFailWith(`${at} page-stream start https://elsewhere.test/`, 'a path of this server');
+      await testCommands(client).shouldFailWith(`${at} page-stream start '/\\elsewhere.test/x'`, 'a path of this server');
+    });
+
+    await t.step('a page is never streamed as the administrator', async () => {
+      const before = ems.requests.filter((request) => request.op === 'pages.put').length;
+      await testCommands(admin).shouldFailWith('page-stream start /dashboard-wall/Kitchen', 'never shown as the administrator');
+      assertEquals(ems.requests.filter((request) => request.op === 'pages.put').length, before);
+      assertEquals(ems.pages.size, 0);
     });
   } finally {
     await ems.close();
     client.close();
+    admin.close();
     await testCtx.teardown();
   }
 });

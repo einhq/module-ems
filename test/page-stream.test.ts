@@ -72,6 +72,8 @@ Deno.test({ name: 'page-stream', sanitizeResources: false, sanitizeOps: false },
 
   try {
     let stream: PageStream;
+    /** The session the media service's browser signed in with, which ends with the stream. */
+    let session = '';
 
     await t.step("start puts the page with an address that signs its browser in, and its stream nodes to write, by the system's settings", async () => {
       stream = await client.execJson<PageStream>(`${at} page-stream start /dashboard-wall/Kitchen --fps=25`);
@@ -93,6 +95,8 @@ Deno.test({ name: 'page-stream', sanitizeResources: false, sanitizeOps: false },
       await signIn.body?.cancel();
       assertEquals(signIn.status, 303);
       assertEquals(signIn.headers.get('location'), '/dashboard-wall/Kitchen');
+      session = `/var/sessions/session-${(signIn.headers.get('set-cookie') ?? '').split(';')[0].split('=')[1].split('.')[0]}`;
+      assertEquals(await vfs.exists(ADMIN_ACCESS, session), true);
     });
 
     await t.step("the media service's browser goes where the system's settings say, whatever the caller's say", async () => {
@@ -184,6 +188,7 @@ Deno.test({ name: 'page-stream', sanitizeResources: false, sanitizeOps: false },
       await client.execJson(`${at} page-stream stop ${stream.id}`);
       assertEquals(ems.pages.size, 0);
       assertEquals(await vfs.exists(ADMIN_ACCESS, `${stream.path}.mp4`), false);
+      assertEquals(await vfs.exists(ADMIN_ACCESS, session), false, "the media service's browser is still signed in");
       const goneHls = await fetch(`${baseUrl}${stream.hls}`);
       await goneHls.body?.cancel();
       assertEquals(goneHls.status, 404);

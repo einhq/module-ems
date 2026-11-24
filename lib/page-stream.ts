@@ -13,6 +13,8 @@
  * (`pressPageStream`), which says what it shows (`pageStreamState`) and takes messages
  * (`tellPageStream`). It stops when it is stopped, and on its own once neither node has had a
  * reader for its idle seconds.
+ * When it stops, the session the media service's browser signed in with ends with it
+ * (`endPageSignIn`).
  *
  * The media service reaches the page at `CFG_EMS_PAGE_ADDRESS`, or where it reaches EiN's files
  * (`CFG_EMS_FILES_ADDRESS`) at EiN's own HTTP port, as the system's files hold them, and the page
@@ -61,7 +63,10 @@ type Held = PageStream & {
   idle: number;
   /** When either node last had a reader, or the stream started. */
   lastRead: number;
+  /** The stream no longer served. */
   end(): void;
+  /** The sessions the media service's browser signed in with ended, which closes its sockets. */
+  endSignIns(): Promise<void>;
 };
 
 /** Where the stream nodes are. */
@@ -165,9 +170,16 @@ export const startPageStream = async (cmd: Command, route: string, opts: PageStr
   const vfs = cmd.sys.vfs;
   const stem = await makeNodes(vfs, access, id, route);
   const slot = `pages/${id}`;
+  // The page's sign-ins, whose sessions end with the stream: one, or two when the first put made room.
+  const signIns: string[] = [];
+  const endSignIns = async () => {
+    for (const path of signIns) await devices.endPageSignIn(path);
+  };
   const put = async () => {
+    const signIn = devices.pageSignIn(access, route);
+    signIns.push(signIn);
     const spec = {
-      url: `${origin}${devices.pageSignIn(access, route)}`,
+      url: `${origin}${signIn}`,
       ...(Object.keys(video).length ? { video } : {}),
       output: { mp4: { path: `${stem}.mp4` }, ts: { path: `${stem}.ts` } },
     };
@@ -193,6 +205,7 @@ export const startPageStream = async (cmd: Command, route: string, opts: PageStr
   } catch (error) {
     await endRunning(instance.url, slot);
     await removeNodes(vfs, stem);
+    await endSignIns();
     throw error;
   }
   const hls = new LiveHls(() => vfs.open(access, `${stem}.ts`, { mode: 'r' }));
@@ -219,6 +232,7 @@ export const startPageStream = async (cmd: Command, route: string, opts: PageStr
       files.end();
       hls.stop();
     },
+    endSignIns,
   };
   const check = setInterval(() => void idleCheck(stream), IDLE_CHECK_MS);
   held().set(id, stream);
@@ -231,7 +245,7 @@ const idleCheck = async (stream: Held): Promise<void> => {
   else if (Date.now() - stream.lastRead > stream.idle * 1000) await endStream(stream);
 };
 
-/** The stream no longer served, the media service's browser closed, its names ended and its nodes removed. */
+/** The stream no longer served, the media service's browser closed and signed out, its names ended and its nodes removed. */
 const endStream = async (stream: Held): Promise<void> => {
   if (held().get(stream.id) !== stream) return;
   held().delete(stream.id);
@@ -239,6 +253,7 @@ const endStream = async (stream: Held): Promise<void> => {
   try {
     await deletePage(LASTING, stream.instance, stream.id);
   } finally {
+    await stream.endSignIns();
     await endRunning(stream.instance.url, `pages/${stream.id}`);
     await removeNodes(stream.vfs, stream.path);
   }

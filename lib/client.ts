@@ -1181,7 +1181,7 @@ type VideoStreamOptions = {
   start?: number;
   /** How many seconds of the video to stream; to its end when absent. */
   duration?: number;
-  /** The stream's clock is the video's, starting at `start`: for the segments of one HLS playlist. */
+  /** On the video's clock rather than from 0, so the segments of one HLS playlist run on from each other. */
   sourceClock?: boolean;
   /** Fragmented MP4 (the default) or MPEG-TS. */
   format?: 'mp4' | 'mpegts';
